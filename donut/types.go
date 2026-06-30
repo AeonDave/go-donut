@@ -87,7 +87,7 @@ type DonutConfig struct {
 	Thread   uint32
 	Compress uint32
 	Unicode  uint32
-	OEP      uint64
+	OEP      uint32
 	ExitOpt  uint32
 	Format   uint32
 
@@ -96,6 +96,7 @@ type DonutConfig struct {
 	Method  string // Used by Native DLL and .NET DLL
 	Runtime string
 	Bypass  int
+	Headers int
 
 	Module     *DonutModule
 	ModuleName string
@@ -162,8 +163,8 @@ type DonutInstance struct {
 	Hash [64]uint64 // holds up to 64 api hashes/addrs {api}
 
 	ExitOpt uint32 // call RtlExitUserProcess to terminate the host process
-	Entropy uint32 // indicates entropt option
-	OEP     uint64 // original entrypoint
+	Entropy uint32 // indicates entropy option
+	OEP     uint32 // original entrypoint (uint32 in donut v1.0)
 
 	// everything from here is encrypted
 	ApiCount uint32               // the 64-bit hashes of API required for instance to work
@@ -174,19 +175,26 @@ type DonutInstance struct {
 	Amsi       [8]byte  // "amsi"
 	Clr        [4]byte  // clr
 	Wldp       [8]byte  // wldp
+	Ntdll      [8]byte  // ntdll
 
 	CmdSyms [DONUT_MAX_NAME]byte // symbols related to command line
 	ExitApi [DONUT_MAX_NAME]byte // exit-related API
 
-	Bypass         uint32   // indicates behaviour of byassing AMSI/WLDP
-	WldpQuery      [32]byte // WldpQueryDynamicCodeTrust
-	WldpIsApproved [32]byte // WldpIsClassInApprovedList
-	AmsiInit       [16]byte // AmsiInitialize
-	AmsiScanBuf    [16]byte // AmsiScanBuffer
-	AmsiScanStr    [16]byte // AmsiScanString
+	Bypass             uint32   // indicates behaviour of bypassing AMSI/WLDP
+	Headers            uint32   // preserve PE headers option
+	WldpQuery          [32]byte // WldpQueryDynamicCodeTrust
+	WldpIsApproved     [32]byte // WldpIsClassInApprovedList
+	AmsiInit           [16]byte // AmsiInitialize
+	AmsiScanBuf        [16]byte // AmsiScanBuffer
+	AmsiScanStr        [16]byte // AmsiScanString
+	EtwEventWrite      [16]byte // EtwEventWrite
+	EtwEventUnregister [20]byte // EtwEventUnregister
+	EtwRet64           [1]byte  // ret for x64
+	EtwRet32           [4]byte  // ret 14h for x86
 
-	Wscript     [8]byte  // WScript
-	Wscript_exe [12]byte // wscript.exe
+	Wscript     [8]byte   // WScript
+	Wscript_exe [12]byte  // wscript.exe
+	Decoy       [520]byte // decoy module path (MAX_PATH*2)
 
 	XIID_IUnknown  uuid.UUID
 	XIID_IDispatch uuid.UUID
@@ -210,8 +218,10 @@ type DonutInstance struct {
 
 	Type uint32 // DONUT_INSTANCE_PIC or DONUT_INSTANCE_URL
 
-	Url [DONUT_MAX_URL]byte // staging server hosting donut module
-	Req [8]byte             // just a buffer for "GET"
+	Server   [DONUT_MAX_NAME]byte // staging server
+	Username [DONUT_MAX_NAME]byte // HTTP auth username
+	Password [DONUT_MAX_NAME]byte // HTTP auth password
+	HttpReq  [8]byte              // "GET"
 
 	Sig [DONUT_MAX_NAME]byte // string to hash
 	Mac uint64               // to verify decryption ok
@@ -227,7 +237,8 @@ func (inst *DonutInstance) WriteTo(w *bytes.Buffer) {
 	WriteField(w, "Len", inst.Len)
 	WriteField(w, "KeyMk", inst.KeyMk)
 	WriteField(w, "KeyCtr", inst.KeyCtr)
-	for i := 0; i < 4; i++ { // padding to 8-byte alignment after 4 byte field
+	// 4-byte padding: C struct alignment after DONUT_CRYPT(32) + uint32_t len(4) = 36, pad to 40 for uint64_t iv
+	for i := 0; i < 4; i++ {
 		w.WriteByte(0)
 	}
 	WriteField(w, "Iv", inst.Iv)
@@ -244,19 +255,30 @@ func (inst *DonutInstance) WriteTo(w *bytes.Buffer) {
 	WriteField(w, "Amsi", inst.Amsi)
 	WriteField(w, "Clr", inst.Clr)
 	WriteField(w, "Wldp", inst.Wldp)
+	WriteField(w, "Ntdll", inst.Ntdll)
 
 	WriteField(w, "CmdSyms", inst.CmdSyms)
 	WriteField(w, "ExitApi", inst.ExitApi)
 
 	WriteField(w, "Bypass", inst.Bypass)
+	WriteField(w, "Headers", inst.Headers)
 	WriteField(w, "WldpQuery", inst.WldpQuery)
 	WriteField(w, "WldpIsApproved", inst.WldpIsApproved)
 	WriteField(w, "AmsiInit", inst.AmsiInit)
 	WriteField(w, "AmsiScanBuf", inst.AmsiScanBuf)
 	WriteField(w, "AmsiScanStr", inst.AmsiScanStr)
+	WriteField(w, "EtwEventWrite", inst.EtwEventWrite)
+	WriteField(w, "EtwEventUnregister", inst.EtwEventUnregister)
+	WriteField(w, "EtwRet64", inst.EtwRet64)
+	WriteField(w, "EtwRet32", inst.EtwRet32)
 
 	WriteField(w, "Wscript", inst.Wscript)
 	WriteField(w, "WscriptExe", inst.Wscript_exe)
+	WriteField(w, "Decoy", inst.Decoy)
+	// 3-byte alignment pad (wscript_exe ends at odd offset, GUIDs need 4-byte align)
+	for i := 0; i < 3; i++ {
+		w.WriteByte(0)
+	}
 
 	swapUUID(w, inst.XIID_IUnknown)
 	swapUUID(w, inst.XIID_IDispatch)
@@ -277,12 +299,18 @@ func (inst *DonutInstance) WriteTo(w *bytes.Buffer) {
 	swapUUID(w, inst.XIID_IActiveScriptParse64)
 
 	WriteField(w, "Type", inst.Type)
-	WriteField(w, "Url", inst.Url)
-	WriteField(w, "Req", inst.Req)
+	WriteField(w, "Server", inst.Server)
+	WriteField(w, "Username", inst.Username)
+	WriteField(w, "Password", inst.Password)
+	WriteField(w, "HttpReq", inst.HttpReq)
 	WriteField(w, "Sig", inst.Sig)
 	WriteField(w, "Mac", inst.Mac)
 	WriteField(w, "ModKeyMk", inst.ModKeyMk)
 	WriteField(w, "ModKeCtr", inst.ModKeyCtr)
+	// 4-byte padding: mod_key ends at offset not aligned to 8 for uint64_t mod_len
+	for i := 0; i < 4; i++ {
+		w.WriteByte(0)
+	}
 	WriteField(w, "Mod_len", inst.Mod_len)
 }
 
@@ -304,12 +332,21 @@ var api_imports = []API_IMPORT{
 	API_IMPORT{Module: KERNEL32_DLL, Name: "GetUserDefaultLCID"},
 	API_IMPORT{Module: KERNEL32_DLL, Name: "WaitForSingleObject"}, //10
 	API_IMPORT{Module: KERNEL32_DLL, Name: "CreateThread"},
+	API_IMPORT{Module: KERNEL32_DLL, Name: "CreateFileA"},
+	API_IMPORT{Module: KERNEL32_DLL, Name: "GetFileSizeEx"},
 	API_IMPORT{Module: KERNEL32_DLL, Name: "GetThreadContext"},
-	API_IMPORT{Module: KERNEL32_DLL, Name: "GetCurrentThread"},
+	API_IMPORT{Module: KERNEL32_DLL, Name: "GetCurrentThread"}, // 15
+	API_IMPORT{Module: KERNEL32_DLL, Name: "GetCurrentProcess"},
 	API_IMPORT{Module: KERNEL32_DLL, Name: "GetCommandLineA"},
-	API_IMPORT{Module: KERNEL32_DLL, Name: "GetCommandLineW"}, // 15
+	API_IMPORT{Module: KERNEL32_DLL, Name: "GetCommandLineW"},
+	API_IMPORT{Module: KERNEL32_DLL, Name: "HeapAlloc"},
+	API_IMPORT{Module: KERNEL32_DLL, Name: "HeapReAlloc"}, // 20
+	API_IMPORT{Module: KERNEL32_DLL, Name: "GetProcessHeap"},
+	API_IMPORT{Module: KERNEL32_DLL, Name: "HeapFree"},
+	API_IMPORT{Module: KERNEL32_DLL, Name: "GetLastError"},
+	API_IMPORT{Module: KERNEL32_DLL, Name: "CloseHandle"},
 
-	API_IMPORT{Module: SHELL32_DLL, Name: "CommandLineToArgvW"},
+	API_IMPORT{Module: SHELL32_DLL, Name: "CommandLineToArgvW"}, // 25
 
 	API_IMPORT{Module: OLEAUT32_DLL, Name: "SafeArrayCreate"},
 	API_IMPORT{Module: OLEAUT32_DLL, Name: "SafeArrayCreateVector"},
@@ -325,7 +362,8 @@ var api_imports = []API_IMPORT{
 	API_IMPORT{Module: WININET_DLL, Name: "InternetOpenA"},
 	API_IMPORT{Module: WININET_DLL, Name: "InternetConnectA"},
 	API_IMPORT{Module: WININET_DLL, Name: "InternetSetOptionA"},
-	API_IMPORT{Module: WININET_DLL, Name: "InternetReadFile"}, // 30
+	API_IMPORT{Module: WININET_DLL, Name: "InternetReadFile"},
+	API_IMPORT{Module: WININET_DLL, Name: "InternetQueryDataAvailable"},
 	API_IMPORT{Module: WININET_DLL, Name: "InternetCloseHandle"},
 	API_IMPORT{Module: WININET_DLL, Name: "HttpOpenRequestA"},
 	API_IMPORT{Module: WININET_DLL, Name: "HttpSendRequestA"},
@@ -348,9 +386,9 @@ var api_imports = []API_IMPORT{
 	API_IMPORT{Module: NTDLL_DLL, Name: "RtlGetCompressionWorkSpaceSize"},
 	API_IMPORT{Module: NTDLL_DLL, Name: "RtlDecompressBuffer"},
 	API_IMPORT{Module: NTDLL_DLL, Name: "NtContinue"},
-
-	API_IMPORT{Module: KERNEL32_DLL, Name: "AddVectoredExceptionHandler"}, // 50
-	API_IMPORT{Module: KERNEL32_DLL, Name: "RemoveVectoredExceptionHandler"},
+	API_IMPORT{Module: NTDLL_DLL, Name: "NtCreateSection"},
+	API_IMPORT{Module: NTDLL_DLL, Name: "NtMapViewOfSection"},
+	API_IMPORT{Module: NTDLL_DLL, Name: "NtUnmapViewOfSection"},
 }
 
 // required to load .NET assemblies
