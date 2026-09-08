@@ -58,7 +58,7 @@ const (
 
 type ModuleType int
 
-const (
+const ( //lint:ignore SA9004 Keep only the first constant explicitly typed for source compatibility with v1.1.2.
 	DONUT_MODULE_NET_DLL ModuleType = 1 // .NET DLL. Requires class and method
 	DONUT_MODULE_NET_EXE            = 2 // .NET EXE. Executes Main if no class and method provided
 	DONUT_MODULE_DLL                = 3 // Unmanaged DLL, function is optional
@@ -70,7 +70,7 @@ const (
 
 type InstanceType int
 
-const (
+const ( //lint:ignore SA9004 Keep only the first constant explicitly typed for source compatibility with v1.1.2.
 	DONUT_INSTANCE_PIC InstanceType = 1 // Self-contained
 	DONUT_INSTANCE_URL              = 2 // Download from remote server
 )
@@ -97,7 +97,7 @@ type DonutConfig struct {
 	Runtime string
 	Bypass  int
 	Headers int
-	Morph   bool // Enable polymorphic mutation of loader stub
+	Morph   bool // Enable RX-safe generation-time variation of loader stub
 
 	Module     *DonutModule
 	ModuleName string
@@ -442,16 +442,6 @@ var ( //the first 6 bytes of these were int32+int16, need to be swapped on write
 
 	xCLSID_JScript = uuid.UUID{
 		0xF4, 0x14, 0xC2, 0x60, 0x6A, 0xC0, 0x11, 0xCF, 0xB6, 0xD1, 0x00, 0xAA, 0x00, 0xBB, 0xBB, 0x58}
-
-	// required to load XSL files
-	xCLSID_DOMDocument30 = uuid.UUID{
-		0xf5, 0x07, 0x8f, 0x32, 0xc5, 0x51, 0x11, 0xd3, 0x89, 0xb9, 0x00, 0x00, 0xf8, 0x1f, 0xe2, 0x21}
-
-	xIID_IXMLDOMDocument = uuid.UUID{
-		0x29, 0x33, 0xBF, 0x81, 0x7B, 0x36, 0x11, 0xD2, 0xB2, 0x0E, 0x00, 0xC0, 0x4F, 0x98, 0x3E, 0x60}
-
-	xIID_IXMLDOMNode = uuid.UUID{
-		0x29, 0x33, 0xbf, 0x80, 0x7b, 0x36, 0x11, 0xd2, 0xb2, 0x0e, 0x00, 0xc0, 0x4f, 0x98, 0x3e, 0x60}
 )
 
 func swapUUID(w io.Writer, u uuid.UUID) {

@@ -69,7 +69,7 @@ func run(args []string) error {
 		Help: ".NET assembly, EXE, DLL, VBS, JS or XSL file to execute in-memory."})
 
 	morphFlag := parser.Flag("", "morph", &argparse.Options{Required: false,
-		Help: "Enable polymorphic mutation of loader stub. Randomize the loader byte representation across builds."})
+		Help: "Enable RX-safe generation-time variation of loader bytes."})
 	verbose := parser.Flag("v", "verbose", &argparse.Options{Required: false, Help: "Show verbose output."})
 
 	if err := parser.Parse(args); err != nil {

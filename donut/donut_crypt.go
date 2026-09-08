@@ -97,7 +97,7 @@ func Encrypt(mk []byte, ctr []byte, data []byte) []byte {
 		p += r
 
 		// update counter
-		for i := CipherBlockLen - 1; i >= 0; i-- {
+		for i := int(CipherBlockLen) - 1; i >= 0; i-- {
 			ctr[i]++
 			if ctr[i] != 0 {
 				break

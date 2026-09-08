@@ -9,26 +9,33 @@ Based on [Binject/go-donut](https://github.com/Binject/go-donut), updated to the
 - **Donut v1.1 loader stages** — x86 core and stack-aligned x64 final stage
 - **Struct layout** matches the Donut v1.1 ABI — alignment padding fixes, OEP as uint32, new fields (Ntdll, Headers, ETW bypass, Decoy, split HTTP auth)
 - **API imports** — 63 entries (HeapAlloc, NtCreateSection, InternetQueryDataAvailable, etc.)
-- **Polymorphic output** (`--morph`) — optional build-time mutation engine that varies the generated loader bytes between successful generations
+- **Polymorphic output** (`--morph`) — optional generation-time mutation that varies the shellcode layout while keeping the emitted loader RX-safe
 - **.NET support** verified working (Certify, Rubeus, RunasCs)
 
 ## Polymorphic Mutation Engine
 
-When `--morph` is enabled, each successful shellcode generation samples a non-zero XOR key, an arithmetic decoder form, and NOP padding for the loader. These random choices usually produce different loader bytes and hashes for the same input; diversity is probabilistic and applies to the generated loader region.
+When `--morph` is enabled, mutation happens during shellcode generation. The
+output contains no runtime decoder and does not rewrite executable memory, so
+the generated stage can be handed off as `PAGE_EXECUTE_READ` while preserving
+W^X. Random choices usually produce different surrounding bytes and hashes for
+the same input; diversity is probabilistic.
 
 | Technique | Description |
 |-----------|-------------|
-| **Arithmetic XOR encoding** | Loader stub is XOR-encoded with a random key, but the decoder uses arithmetic equivalents (`(A & ~B) \| (~A & B)`) instead of a direct XOR instruction |
-| **Preamble substitution** | Fixed preamble instructions are replaced with semantically equivalent alternatives (`xor eax,eax` ↔ `sub eax,eax` ↔ `and eax,0`) |
-| **Junk insertion** | Intel-defined NOP-equivalent instruction sequences are inserted before the decoder stub |
+| **NOP-equivalent padding** | Generation prefixes each selected loader block with Intel-defined NOP encodings after any required architecture preamble. They have no architectural side effects and never modify code at runtime. |
+| **X84 preamble substitution** | In dual-architecture mode, the zeroing instruction is selected from `xor eax,eax`, `sub eax,eax`, and `and eax,0`; the mode-switch branch displacement is regenerated for the resulting layout. |
 
-The mutation engine is covered by structural tests and decoder encode/decode round-trip tests. The test suite does not execute generated shellcode, so runtime equivalence and resistance to a particular static signature are not guaranteed by this project.
+The canonical Donut v1.1 loader body remains present in the output. Morph
+changes the surrounding padding and, for X84, the equivalent dispatch
+preamble; it does not transform or conceal the loader body. This gives static
+layout diversity with a larger or otherwise different wrapper, while retaining
+the original loader ABI and entry contracts.
 
 ```go
 config := donut.DefaultConfig()
 config.Arch = donut.X64
 config.Entropy = donut.DONUT_ENTROPY_RANDOM
-config.Morph = true // enable polymorphic output
+config.Morph = true // enable generation-time, RX-safe mutation
 shellcode, err := donut.ShellcodeFromFile("payload.exe", config)
 ```
 
@@ -83,31 +90,35 @@ go-donut -i payload.exe -a x64 -e 2 -o loader.bin --morph
 | Field | Type | Description |
 |-------|------|-------------|
 | `Arch` | `DonutArch` | `X32` (1), `X64` (2), `X84` (3 = dual) |
-| `InstType` | `int` | `DONUT_INSTANCE_PIC` (1) or `DONUT_INSTANCE_URL` (2) |
-| `Entropy` | `int` | `1` = none, `2` = random names (default) |
+| `InstType` | `InstanceType` | `DONUT_INSTANCE_PIC` (1) or `DONUT_INSTANCE_URL` (2) |
+| `Entropy` | `uint32` | `1` = none, `2` = random names (default) |
 | `Bypass` | `int` | `1` = skip, `2` = abort on fail, `3` = continue on fail |
 | `Compress` | `int` | `0` or `1` = none; compression modes `2`–`4` are unsupported |
 | `Format` | `int` | `0` or `1` = raw shellcode; other output formats are unsupported |
 | `ExitOpt` | `int` | `1` = ExitThread, `2` = ExitProcess, `3` = block |
 | `Thread` | `uint32` | `1` = run EXE entrypoint as thread (hooks exit APIs) |
-| `Morph` | `bool` | Enable polymorphic mutation of loader stub |
+| `Morph` | `bool` | Enable generation-time static mutation; no runtime decoder is emitted |
 | `Parameters` | `string` | One payload parameter string; it is not split by commas, semicolons, or shell parsing |
 | `Class` | `string` | .NET class name (required for .NET DLL) |
 | `Method` | `string` | .NET method or DLL export name |
 
-## v1.1.2 compared with Donut v1.1
+## v1.1.3 compared with Donut v1.1
 
-Version 1.1.2 updates the Go port while preserving the Donut v1.1 instance ABI
-and layout. The comparison with Donut v1.1 applies to the functions verified in
-this repository and does not claim feature parity with the C tool.
+Version 1.1.3 includes the published v1.1.2 changes plus the post-release
+RX-safe Morph fix. It preserves the Donut v1.1 instance ABI and layout. The
+comparison with Donut v1.1 applies to the functions verified in this repository
+and does not claim feature parity with the C tool.
 
 - The Go port uses the v1.1 loader stages with a source-guided fix for the
   inherited remap path: it requests the original mapped base for the second
   view and returns on mapping failure.
-- `--morph` adds verified mutations for x86 (`x32`), x64 (`x64`), and the dual
-  target (`x84`) while preserving the public `Sandwich` signature.
-- Random generation uses `crypto/rand` with propagated errors; invalid counts,
-  failing random sources, and concurrent access are covered by tests.
+- In v1.1.2, `--morph` used a runtime XOR decoder that rewrote its loader in
+  place. An Ashura handoff that marked the stage `PAGE_EXECUTE_READ` could
+  therefore fault. v1.1.3 removes the runtime decoder and self-writes:
+  `--morph` now applies generation-time NOP padding and X84 preamble
+  substitutions for x86 (`x32`), x64 (`x64`), and the dual target (`x84`). The
+  canonical v1.1 loader body remains in the generated stage.
+- Random generation uses `crypto/rand` with propagated errors.
 - The CLI returns non-zero status on errors and validates architecture, entropy,
   compression, format, and OEP before generating output.
 - URL staging validates configuration before download, handles explicit or
@@ -115,21 +126,28 @@ this repository and does not claim feature parity with the C tool.
 - Existing public functions remain available; new behavior is exposed through
   `DonutConfig.Morph` and `--morph`.
 
-Runtime qualification used ABI-correct relocatable PE payloads, verified
-harnesses, GDB 16.3 hidden/batch mode, serial execution, a marker, and three
-breakpoints. Each case exited 0 with the marker and breakpoints present and no
-exception:
+Runtime qualification for the generation-time Morph path is complete for the
+tested relocatable fixtures. The generator was rebuilt from the current source
+tree and run under GNU GDB 16.3 with hidden, serial processes. The RX harness
+copied each generated loader into `PAGE_READWRITE`, changed it to
+`PAGE_EXECUTE_READ`, flushed the instruction cache, and only then started the
+loader thread. All 16 cases passed: X32/x86, X64/x64, X84/x86, and X84/x64,
+each with canonical and Morph output at entropy 1 and 2. Every generator and
+GDB run exited 0, emitted the exact marker, reached both harness checkpoints,
+and recorded no exception, timeout, or residual test process. GDB also hit the
+`before_shellcode`, `after_shellcode`, and `child_result` breakpoints in every
+case; each breakpoint command emitted a parseable token and auto-continued.
 
-| Target and payload | Entropy | Default loader + morph | Result |
-|---|---|---|---|
-| x32 / x86 | 1 and 2 | both | PASS (4/4) |
-| x64 / x64 | 1 and 2 | both | PASS (4/4) |
-| x84 / x86 | 1 and 2 | both | PASS (4/4) |
-| x84 / x64 | 1 and 2 | both | PASS (4/4) |
+The current Go gate set covers 58 tests. Go 1.27.1 `go test -race ./...` is
+green. Updated staticcheck on Go 1.27.1 and govulncheck are clean. Under Go
+1.16, `go test ./...`, `go vet ./...`, and `go build ./...` are green. Go 1.16
+race is not qualified because of a pre-existing linker limitation.
 
-The available Go gates are green for `go test ./...` (58 tests),
-`go test -race ./...` (58 tests), `go test -count=20 ./...` (1160 tests),
-`go vet ./...`, and `go build ./...`.
+The public API remains compatible: `DonutConfig.Morph` and `--morph` keep their
+existing interfaces, `Sandwich` keeps its two-argument signature, and the
+serialized Donut v1.1 instance ABI is unchanged. Consumers should use the
+returned shellcode length rather than assuming a fixed wrapper size because
+generation-time padding can change it.
 
 The supported scope remains explicit: entropy `3`, compression `2`–`4`, and
 output formats `2`–`8` are rejected. Raw formats `0` and `1`, entropy `1` and

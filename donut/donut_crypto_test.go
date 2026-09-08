@@ -23,7 +23,7 @@ func Test_Chaskey_1(t *testing.T) {
 	data := plain
 	outdata := Chaskey(key, data)
 
-	if bytes.Compare(outdata, cipher) == 0 {
+	if bytes.Equal(outdata, cipher) {
 		t.Log("Chaskey Test Passed")
 	} else {
 		t.Log("Chaskey Test Failed\n", outdata, cipher)
@@ -37,7 +37,7 @@ func Test_Maru_1(t *testing.T) {
 	hash := Maru([]byte("SafeArrayCreateVector"), iv) ^ dllHash
 	log.Printf("Hash: %x (dllHash was %x)\n", hash, dllHash)
 
-	if 0xbd77af2569689c8a == hash {
+	if hash == 0xbd77af2569689c8a {
 		t.Log("Maru Test Passed")
 	} else {
 		t.Log("Maru Test Failed\n")
@@ -53,10 +53,38 @@ func Test_Maru_2(t *testing.T) {
 	log.Printf("Hash: %x (dllHash was %x)\n", hash, dllHash)
 
 	//0x17, 0xFC, 0xA0, 0x40, 0xD2, 0xBA, 0x66, 0xC7
-	if 0xc766bad240a0fc17 == hash {
+	if hash == 0xc766bad240a0fc17 {
 		t.Log("Maru Test Passed")
 	} else {
 		t.Log("Maru Test Failed\n")
 		t.Fail()
+	}
+}
+
+func TestEncryptCounterWrapsAfterFullCarry(t *testing.T) {
+	const blockLen = int(CipherBlockLen)
+
+	initialCounter := bytes.Repeat([]byte{0xff}, blockLen)
+	data := bytes.Repeat([]byte{0x3c}, 2*blockLen)
+	counter := append([]byte(nil), initialCounter...)
+
+	firstBlock := Chaskey(key, initialCounter)
+	zeroCounter := make([]byte, blockLen)
+	secondBlock := Chaskey(key, zeroCounter)
+	expected := make([]byte, len(data))
+	for i := 0; i < blockLen; i++ {
+		expected[i] = data[i] ^ firstBlock[i]
+		expected[blockLen+i] = data[blockLen+i] ^ secondBlock[i]
+	}
+
+	got := Encrypt(key, counter, data)
+	if !bytes.Equal(got, expected) {
+		t.Fatalf("Encrypt counter wrap mismatch: got %x, want %x", got, expected)
+	}
+
+	finalCounter := make([]byte, blockLen)
+	finalCounter[blockLen-1] = 1
+	if !bytes.Equal(counter, finalCounter) {
+		t.Fatalf("Encrypt counter after full carry = %x, want %x", counter, finalCounter)
 	}
 }

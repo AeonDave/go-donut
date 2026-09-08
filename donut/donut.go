@@ -164,7 +164,8 @@ func Sandwich(arch DonutArch, payload *bytes.Buffer) (*bytes.Buffer, error) {
 }
 
 // sandwich adds the donut prefix and loader stub around payload. When morph is
-// true, the loader is encoded and surrounded by the mutation helpers.
+// true, the loader receives generation-time byte variation only. The emitted
+// loader remains directly executable from RX memory.
 func sandwich(arch DonutArch, payload *bytes.Buffer, morph bool) (*bytes.Buffer, error) {
 	if payload == nil {
 		return nil, fmt.Errorf("donut: nil payload")
@@ -209,34 +210,24 @@ func sandwich(arch DonutArch, payload *bytes.Buffer, morph bool) (*bytes.Buffer,
 			w.WriteByte(0x52)
 		}
 		if morph {
-			encoded, decoder, err := encodeLoader(LOADER_EXE_X86, false)
+			loader, err := morphLoader(LOADER_EXE_X86)
 			if err != nil {
-				return nil, fmt.Errorf("donut: encode x86 loader: %w", err)
+				return nil, fmt.Errorf("donut: morph x86 loader: %w", err)
 			}
-			junked, err := insertJunk(decoder)
-			if err != nil {
-				return nil, fmt.Errorf("donut: insert x86 decoder junk: %w", err)
-			}
-			w.Write(junked)
-			w.Write(encoded)
-			targetLen = int(instanceLen) + len(encoded) + len(junked) + 48
+			w.Write(loader)
+			targetLen = int(instanceLen) + len(loader) + 32
 		} else {
 			w.Write(LOADER_EXE_X86)
 			targetLen = int(instanceLen) + len(LOADER_EXE_X86) + 32
 		}
 	case X64:
 		if morph {
-			encoded, decoder, err := encodeLoader(LOADER_EXE_X64, true)
+			loader, err := morphLoader(LOADER_EXE_X64)
 			if err != nil {
-				return nil, fmt.Errorf("donut: encode x64 loader: %w", err)
+				return nil, fmt.Errorf("donut: morph x64 loader: %w", err)
 			}
-			junked, err := insertJunk(decoder)
-			if err != nil {
-				return nil, fmt.Errorf("donut: insert x64 decoder junk: %w", err)
-			}
-			w.Write(junked)
-			w.Write(encoded)
-			targetLen = int(instanceLen) + len(encoded) + len(junked) + 48
+			w.Write(loader)
+			targetLen = int(instanceLen) + len(loader) + 6
 		} else {
 			w.Write(LOADER_EXE_X64)
 			targetLen = int(instanceLen) + len(LOADER_EXE_X64) + 6
@@ -262,15 +253,11 @@ func sandwich(arch DonutArch, payload *bytes.Buffer, morph bool) (*bytes.Buffer,
 			// loader backing array.
 			x64Loader := append([]byte(nil), x64Wrapper...)
 			x64Loader = append(x64Loader, x64Core...)
-			x64Encoded, x64Decoder, err := encodeLoader(x64Loader, true)
+			x64Morphed, err := morphLoader(x64Loader)
 			if err != nil {
-				return nil, fmt.Errorf("donut: encode x64 loader for x84: %w", err)
+				return nil, fmt.Errorf("donut: morph x64 loader for x84: %w", err)
 			}
-			x64Junked, err := insertJunk(x64Decoder)
-			if err != nil {
-				return nil, fmt.Errorf("donut: insert x64 decoder junk for x84: %w", err)
-			}
-			x64Block := append(x64Junked, x64Encoded...)
+			x64Block := x64Morphed
 			if err := binary.Write(w, binary.LittleEndian, uint32(len(x64Block))); err != nil {
 				return nil, fmt.Errorf("donut: write x84 x64 jump length: %w", err)
 			}
@@ -280,17 +267,12 @@ func sandwich(arch DonutArch, payload *bytes.Buffer, morph bool) (*bytes.Buffer,
 				return nil, fmt.Errorf("donut: create x84 x86 morph preamble: %w", err)
 			}
 			w.Write(x32Preamble) // pop edx, push ecx, push edx (morphed)
-			x86Encoded, x86Decoder, err := encodeLoader(LOADER_EXE_X86, false)
+			x86Morphed, err := morphLoader(LOADER_EXE_X86)
 			if err != nil {
-				return nil, fmt.Errorf("donut: encode x86 loader for x84: %w", err)
+				return nil, fmt.Errorf("donut: morph x86 loader for x84: %w", err)
 			}
-			x86Junked, err := insertJunk(x86Decoder)
-			if err != nil {
-				return nil, fmt.Errorf("donut: insert x86 decoder junk for x84: %w", err)
-			}
-			w.Write(x86Junked)
-			w.Write(x86Encoded)
-			targetLen = int(instanceLen) + len(x64Block) + len(x86Encoded) + len(x86Junked) + 48
+			w.Write(x86Morphed)
+			targetLen = int(instanceLen) + len(x64Block) + len(x86Morphed) + 32
 		} else {
 			if err := binary.Write(w, binary.LittleEndian, uint32(len(x64Wrapper)+len(x64Core))); err != nil {
 				return nil, fmt.Errorf("donut: write x84 x64 jump length: %w", err)
