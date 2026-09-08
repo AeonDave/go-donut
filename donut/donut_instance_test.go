@@ -69,6 +69,56 @@ func TestV11ArchitectureValuesAndInstanceLayout(t *testing.T) {
 	}
 }
 
+func serializedInstanceForEntropy(t *testing.T, entropy uint32) []byte {
+	t.Helper()
+
+	config := DefaultConfig()
+	config.Entropy = entropy
+	config.ModuleData = bytes.NewBuffer([]byte("module-data"))
+
+	serialized, err := CreateInstance(config)
+	if err != nil {
+		t.Fatalf("CreateInstance() error = %v", err)
+	}
+
+	return append([]byte(nil), serialized.Bytes()...)
+}
+
+func TestCreateInstanceWithoutEntropyIsDeterministic(t *testing.T) {
+	first := serializedInstanceForEntropy(t, DONUT_ENTROPY_NONE)
+	second := serializedInstanceForEntropy(t, DONUT_ENTROPY_NONE)
+
+	if !bytes.Equal(first, second) {
+		t.Fatal("CreateInstance() with Entropy=NONE produced different serialized instances")
+	}
+}
+
+func TestCreateInstanceDefaultEntropyChangesSerializedOutputWithoutChangingShape(t *testing.T) {
+	first := serializedInstanceForEntropy(t, DONUT_ENTROPY_DEFAULT)
+	second := serializedInstanceForEntropy(t, DONUT_ENTROPY_DEFAULT)
+
+	if len(first) != len(second) {
+		t.Fatalf("serialized instance lengths = %d and %d, want the same shape", len(first), len(second))
+	}
+	if bytes.Equal(first, second) {
+		t.Fatal("CreateInstance() with Entropy=DEFAULT produced identical serialized instances")
+	}
+
+	firstShellcode, err := Sandwich(X64, bytes.NewBuffer(first))
+	if err != nil {
+		t.Fatalf("Sandwich(first instance) error = %v", err)
+	}
+	secondShellcode, err := Sandwich(X64, bytes.NewBuffer(second))
+	if err != nil {
+		t.Fatalf("Sandwich(second instance) error = %v", err)
+	}
+
+	loaderOffset := 5 + len(first) + 1 // call+length, instance, pop rcx
+	if !bytes.Equal(firstShellcode.Bytes()[loaderOffset:], secondShellcode.Bytes()[loaderOffset:]) {
+		t.Fatal("default entropy changed the canonical x64 loader stage")
+	}
+}
+
 func TestPublicEntryPointsRejectNilInputs(t *testing.T) {
 	if _, err := ShellcodeFromURL("http://127.0.0.1", nil); err == nil {
 		t.Fatal("ShellcodeFromURL(nil config) error = nil")
