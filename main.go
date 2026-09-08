@@ -1,13 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 
-	"github.com/Binject/go-donut/donut"
+	"github.com/AeonDave/go-donut/donut"
 	"github.com/akamensky/argparse"
 )
 
@@ -67,14 +68,10 @@ func main() {
 		return
 	}
 
-	var err error
-	oep := uint64(0)
-	if *oepString != "" {
-		oep, err = strconv.ParseUint(*oepString, 16, 64)
-		if err != nil {
-			log.Println("Invalid OEP: " + err.Error())
-			return
-		}
+	oep, err := parseOEP(*oepString)
+	if err != nil {
+		log.Println("Invalid OEP: " + err.Error())
+		return
 	}
 
 	var donutArch donut.DonutArch
@@ -146,4 +143,22 @@ func main() {
 	} else {
 		log.Println("Done!")
 	}
+}
+
+// parseOEP accepts the hexadecimal OEP offset used by the Donut CLI. Donut v1.1
+// stores this value in a 32-bit instance field, so accepting a larger CLI value
+// would silently truncate the generated loader configuration.
+func parseOEP(value string) (uint32, error) {
+	if value == "" {
+		return 0, nil
+	}
+
+	parsed, err := strconv.ParseUint(value, 16, 64)
+	if err != nil {
+		return 0, err
+	}
+	if parsed > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("%#x exceeds the 32-bit Donut OEP field", parsed)
+	}
+	return uint32(parsed), nil
 }

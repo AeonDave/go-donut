@@ -3,6 +3,7 @@ package donut
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"path/filepath"
@@ -23,6 +24,9 @@ import (
 
 // ShellcodeFromURL - Downloads a PE from URL, makes shellcode
 func ShellcodeFromURL(fileURL string, config *DonutConfig) (*bytes.Buffer, error) {
+	if config == nil {
+		return nil, fmt.Errorf("donut: nil config")
+	}
 	buf, err := DownloadFile(fileURL)
 	if err != nil {
 		return nil, err
@@ -44,6 +48,9 @@ func DetectDotNet(filename string) (bool, string) {
 
 // ShellcodeFromFile - Loads PE from file, makes shellcode
 func ShellcodeFromFile(filename string, config *DonutConfig) (*bytes.Buffer, error) {
+	if config == nil {
+		return nil, fmt.Errorf("donut: nil config")
+	}
 
 	switch strings.ToLower(filepath.Ext(filename)) {
 	case ".exe":
@@ -83,6 +90,12 @@ func ShellcodeFromFile(filename string, config *DonutConfig) (*bytes.Buffer, err
 
 // ShellcodeFromBytes - Passed a PE as byte array, makes shellcode
 func ShellcodeFromBytes(buf *bytes.Buffer, config *DonutConfig) (*bytes.Buffer, error) {
+	if config == nil {
+		return nil, fmt.Errorf("donut: nil config")
+	}
+	if buf == nil {
+		return nil, fmt.Errorf("donut: nil input buffer")
+	}
 
 	if err := CreateModule(config, buf); err != nil {
 		return nil, err
@@ -100,7 +113,9 @@ func ShellcodeFromBytes(buf *bytes.Buffer, config *DonutConfig) (*bytes.Buffer, 
 		// save the module to disk using random name
 		instance.Write([]byte{0, 0, 0, 0, 0, 0, 0, 0})          // mystery padding
 		config.ModuleData.Write([]byte{0, 0, 0, 0, 0, 0, 0, 0}) // mystery padding
-		ioutil.WriteFile(config.ModuleName, config.ModuleData.Bytes(), 0644)
+		if err := ioutil.WriteFile(config.ModuleName, config.ModuleData.Bytes(), 0644); err != nil {
+			return nil, fmt.Errorf("donut: write staged module: %w", err)
+		}
 	}
 	//ioutil.WriteFile("newinst.bin", instance.Bytes(), 0644)
 	return Sandwich(config.Arch, instance)
@@ -108,6 +123,9 @@ func ShellcodeFromBytes(buf *bytes.Buffer, config *DonutConfig) (*bytes.Buffer, 
 
 // Sandwich - adds the donut prefix in the beginning (stomps DOS header), then payload, then donut stub at the end
 func Sandwich(arch DonutArch, payload *bytes.Buffer) (*bytes.Buffer, error) {
+	if payload == nil {
+		return nil, fmt.Errorf("donut: nil payload")
+	}
 	/*
 			Disassembly:
 					   0:  e8 					call $+
@@ -126,7 +144,11 @@ func Sandwich(arch DonutArch, payload *bytes.Buffer) (*bytes.Buffer, error) {
 	}
 	w.WriteByte(0x59)
 
-	picLen := int(instanceLen)
+	const x64StagePadding = 26
+	x64CoreLength := len(LOADER_EXE_X64) - 22 - x64StagePadding
+	x64Wrapper := LOADER_EXE_X64[:22]
+	x64Core := LOADER_EXE_X64[22 : 22+x64CoreLength]
+	var targetLen int
 
 	switch arch {
 	case X32:
@@ -134,29 +156,30 @@ func Sandwich(arch DonutArch, payload *bytes.Buffer) (*bytes.Buffer, error) {
 		w.WriteByte(0x51)
 		w.WriteByte(0x52)
 		w.Write(LOADER_EXE_X86)
-		picLen += len(LOADER_EXE_X86)
+		targetLen = int(instanceLen) + len(LOADER_EXE_X86) + 32
 	case X64:
 		w.Write(LOADER_EXE_X64)
-		picLen += len(LOADER_EXE_X64)
+		targetLen = int(instanceLen) + len(LOADER_EXE_X64) + 6
 	case X84:
 		w.WriteByte(0x31) // preamble: xor eax,eax
 		w.WriteByte(0xC0)
 		w.WriteByte(0x48) // dec ecx
 		w.WriteByte(0x0F) // js dword x86_code (skips length of x64 code)
 		w.WriteByte(0x88)
-		binary.Write(w, binary.LittleEndian, uint32(len(LOADER_EXE_X64)))
-		w.Write(LOADER_EXE_X64)
+		binary.Write(w, binary.LittleEndian, uint32(len(x64Wrapper)+len(x64Core)))
+		w.Write(x64Wrapper)
+		w.Write(x64Core)
 
 		w.Write([]byte{0x5A, // in between 32/64 stubs: pop edx
 			0x51,  // push ecx
 			0x52}) // push edx
 		w.Write(LOADER_EXE_X86)
-		picLen += len(LOADER_EXE_X86)
-		picLen += len(LOADER_EXE_X64)
+		targetLen = int(instanceLen) + len(LOADER_EXE_X86) + len(x64Wrapper) + len(x64Core) + 32
+	default:
+		return nil, fmt.Errorf("donut: unsupported architecture %d", arch)
 	}
 
-	lb := w.Len()
-	for i := 0; i < picLen-lb; i++ {
+	for w.Len() < targetLen {
 		w.WriteByte(0x0)
 	}
 
@@ -165,6 +188,12 @@ func Sandwich(arch DonutArch, payload *bytes.Buffer) (*bytes.Buffer, error) {
 
 // CreateModule - Creates the Donut Module from Config
 func CreateModule(config *DonutConfig, inputFile *bytes.Buffer) error {
+	if config == nil {
+		return fmt.Errorf("donut: nil config")
+	}
+	if inputFile == nil {
+		return fmt.Errorf("donut: nil input buffer")
+	}
 
 	mod := new(DonutModule)
 	mod.ModType = uint32(config.Type)
@@ -244,10 +273,16 @@ func CreateModule(config *DonutConfig, inputFile *bytes.Buffer) error {
 
 // CreateInstance - Creates the Donut Instance from Config
 func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
+	if config == nil {
+		return nil, fmt.Errorf("donut: nil config")
+	}
+	if config.ModuleData == nil {
+		return nil, fmt.Errorf("donut: nil module data; call CreateModule first")
+	}
 
 	inst := new(DonutInstance)
 	modLen := uint32(config.ModuleData.Len()) // ModuleData is mod struct + input file
-	instLen := uint32(4760) // donut v1.0 instance struct size (empirically matched to Python donut)
+	instLen := uint32(4760)                   // Donut v1.1 DONUT_INSTANCE size
 	inst.Bypass = uint32(config.Bypass)
 	if config.Headers == 0 {
 		inst.Headers = 1 // DONUT_HEADERS_OVERWRITE (default in C donut)
@@ -395,7 +430,7 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 			"_acmdln;__argv;__p__acmdln;__p___argv;_wcmdln;__wargv;__p__wcmdln;__p___wargv")
 	}
 	if config.Thread != 0 {
-		copy(inst.ExitApi[:], "ExitProcess;exit;_exit;_cexit;_c_exit;quick_exit;_Exit")
+		copy(inst.ExitApi[:], "ExitProcess;exit;_exit;_cexit;_c_exit;quick_exit;_Exit;_o_exit")
 	}
 	// required to disable WLDP
 	copy(inst.Wldp[:], "wldp")

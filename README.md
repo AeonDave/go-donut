@@ -1,15 +1,16 @@
 # go-donut
 
-Pure Go implementation of [Donut](https://github.com/TheWover/donut) shellcode generation. Converts PE files (.NET and native EXE/DLL), VBScript, and JScript into position-independent shellcode.
+AeonDave's Pure Go fork of [Donut](https://github.com/TheWover/donut) shellcode generation. Converts PE files (.NET and native EXE/DLL), VBScript, and JScript into position-independent shellcode.
 
-This fork updates the original [Binject/go-donut](https://github.com/Binject/go-donut) from donut v0.9.3 to **v1.0**, fixing .NET assembly support and adding ETW bypass capabilities.
+This AeonDave fork updates the original [Binject/go-donut](https://github.com/Binject/go-donut) to the **Donut v1.1 runtime layout and canonical x86/x64 loader stages**, while retaining the Go API. The embedded x86 blob and x64 final stage are pinned by source-derived regression tests against the official v1.1 tag.
 
 ## Changes from upstream
 
-- **Loader stubs** updated to donut v1.0 (x64: 22KB → 13KB, x86: matching)
-- **Struct layout** matches C donut v1.0 — 3 alignment padding fixes, OEP as uint32, new fields (Ntdll, Headers, ETW bypass, Decoy, split HTTP auth)
+- **Loader stages** use the canonical Donut v1.1 x86 core and stack-aligned x64 final stage
+- **Struct layout** matches the Donut v1.1 ABI — 3 alignment padding fixes, OEP as uint32, new fields (Ntdll, Headers, ETW bypass, Decoy, split HTTP auth)
 - **API imports** updated to 63 entries (adds HeapAlloc, NtCreateSection, InternetQueryDataAvailable, etc.)
 - **Defaults** fixed: `Compress=0` remapped to `DONUT_COMPRESS_NONE` (1), `Headers` defaults to `DONUT_HEADERS_OVERWRITE` (1)
+- **Donut v1.1 stages**: canonical x86 blob, x64 stack-aligned stage, architecture values, and 4,760-byte instance layout are regression-tested against the official v1.1 sources
 - **.NET support** verified working (Certify, Rubeus, RunasCs)
 
 ## Usage
@@ -63,13 +64,13 @@ func main() {
 | `Compress` | `int` | `0`/`1` = none, `2` = aPLib |
 | `ExitOpt` | `int` | `1` = ExitThread, `2` = ExitProcess, `3` = block |
 | `Thread` | `uint32` | `1` = run EXE entrypoint as thread (hooks exit APIs) |
-| `Parameters` | `string` | Command-line args for the payload |
+| `Parameters` | `string` | One payload parameter string; it is not split by commas, semicolons, or shell parsing |
 | `Class` | `string` | .NET class name (required for .NET DLL) |
 | `Method` | `string` | .NET method or DLL export name |
 
 ## Known limitations
 
-- Instance encryption (`Entropy=3`) has a Chaskey cipher offset mismatch with v1.0 stubs. Use `Entropy=2` (random names without instance encryption). Payload encryption at the loader level (ChaCha20, etc.) is unaffected.
+- Instance encryption (`Entropy=3`) is not qualified in this Go port because its Chaskey offsets do not yet match the embedded v1.1 stages. Use `Entropy=2`; unsupported behavior is documented rather than treated as implicit fallback.
 - Compression via RtlCompressBuffer (LZNT1/Xpress) is not implemented in Go. Use `Compress=0`.
 - .NET tools that call `Environment.Exit` may produce truncated output due to stdout flush timing.
 

@@ -1,4 +1,4 @@
-module github.com/Binject/go-donut
+module github.com/AeonDave/go-donut
 
 go 1.16
 

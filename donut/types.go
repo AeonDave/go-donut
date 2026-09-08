@@ -49,11 +49,11 @@ type DonutArch int
 
 const (
 	// X32 - 32bit
-	X32 DonutArch = iota
+	X32 DonutArch = 1
 	// X64 - 64 bit
-	X64
+	X64 DonutArch = 2
 	// X84 - 32+64 bit
-	X84
+	X84 DonutArch = 3
 )
 
 type ModuleType int
@@ -79,7 +79,7 @@ type DonutConfig struct {
 	Arch       DonutArch
 	Type       ModuleType
 	InstType   InstanceType
-	Parameters string // separated by , or ;
+	Parameters string // one payload parameter string; this library does not split it
 
 	Entropy uint32
 
