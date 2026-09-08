@@ -12,7 +12,7 @@ const (
 	// entropy level
 	DONUT_ENTROPY_NONE    = 1 // don't use any entropy
 	DONUT_ENTROPY_RANDOM  = 2 // use random names
-	DONUT_ENTROPY_DEFAULT = 3 // use random names + symmetric encryption
+	DONUT_ENTROPY_DEFAULT = 3 // unsupported: random names + symmetric encryption
 
 	DONUT_MAX_PARAM   = 8 // maximum number of parameters passed to method
 	DONUT_MAX_NAME    = 256
@@ -97,6 +97,7 @@ type DonutConfig struct {
 	Runtime string
 	Bypass  int
 	Headers int
+	Morph   bool // Enable polymorphic mutation of loader stub
 
 	Module     *DonutModule
 	ModuleName string

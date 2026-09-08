@@ -22,16 +22,20 @@ func TestX64LoaderKeepsV11StackAlignmentPreamble(t *testing.T) {
 	}
 }
 
-func TestX64LoaderMatchesOfficialV11FinalStage(t *testing.T) {
+func TestX64LoaderMatchesOfficialV11PatchedFinalStage(t *testing.T) {
 	const rawCoreLength = 13430
 	const finalStageLength = 13478
-	const officialRawCoreSHA256 = "da0ac2320629d45cd2669a4a21003ecde56bd11f73fa8bfb21abec3863407a1f"
+	const patchedRawCoreSHA256 = "d63fc4e0634e096ed4f655194d51cdabddbf1b6801431b25f2b0651201917d88"
+	const relocationFixOffset = 22 + 0x227d
 
 	if len(LOADER_EXE_X64) != finalStageLength {
 		t.Fatalf("x64 final stage length = %d, want %d", len(LOADER_EXE_X64), finalStageLength)
 	}
-	if got := fmt.Sprintf("%x", sha256.Sum256(LOADER_EXE_X64[22:22+rawCoreLength])); got != officialRawCoreSHA256 {
-		t.Fatalf("x64 raw core SHA-256 = %s, want official v1.1 %s", got, officialRawCoreSHA256)
+	if got := fmt.Sprintf("%x", sha256.Sum256(LOADER_EXE_X64[22:22+rawCoreLength])); got != patchedRawCoreSHA256 {
+		t.Fatalf("x64 patched raw core SHA-256 = %s, want source-guided v1.1 patch %s", got, patchedRawCoreSHA256)
+	}
+	if got, want := LOADER_EXE_X64[relocationFixOffset:relocationFixOffset+4], []byte{0x90, 0x90, 0x90, 0x90}; !bytes.Equal(got, want) {
+		t.Fatalf("x64 relocation fix at core raw offset 0x227d = % x, want NOPs", got)
 	}
 	for i, b := range LOADER_EXE_X64[22+rawCoreLength:] {
 		if b != 0 {
@@ -40,15 +44,19 @@ func TestX64LoaderMatchesOfficialV11FinalStage(t *testing.T) {
 	}
 }
 
-func TestX86LoaderMatchesOfficialV11Tag(t *testing.T) {
+func TestX86LoaderMatchesOfficialV11PatchedTag(t *testing.T) {
 	const officialLength = 11647
-	const officialSHA256 = "0c29cccff1b027d57c467564a333e9ade455144649909a4b797b09b43002ac71"
+	const patchedSHA256 = "c1c9951c0d2856f5f21971226f69f994aefffd24198f92520dc04816b3ac6e71"
+	const relocationFixOffset = 0x1f4f
 
 	if len(LOADER_EXE_X86) != officialLength {
-		t.Fatalf("x86 loader length = %d, want official v1.1 tag %d", len(LOADER_EXE_X86), officialLength)
+		t.Fatalf("x86 patched loader length = %d, want official v1.1 core length %d", len(LOADER_EXE_X86), officialLength)
 	}
-	if got := fmt.Sprintf("%x", sha256.Sum256(LOADER_EXE_X86)); got != officialSHA256 {
-		t.Fatalf("x86 loader SHA-256 = %s, want official v1.1 tag %s", got, officialSHA256)
+	if got := fmt.Sprintf("%x", sha256.Sum256(LOADER_EXE_X86)); got != patchedSHA256 {
+		t.Fatalf("x86 patched loader SHA-256 = %s, want source-guided v1.1 patch %s", got, patchedSHA256)
+	}
+	if got, want := LOADER_EXE_X86[relocationFixOffset:relocationFixOffset+3], []byte{0x90, 0x90, 0x90}; !bytes.Equal(got, want) {
+		t.Fatalf("x86 relocation fix at raw offset 0x1f4f = % x, want NOPs", got)
 	}
 }
 
@@ -93,29 +101,13 @@ func TestCreateInstanceWithoutEntropyIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestCreateInstanceDefaultEntropyChangesSerializedOutputWithoutChangingShape(t *testing.T) {
-	first := serializedInstanceForEntropy(t, DONUT_ENTROPY_DEFAULT)
-	second := serializedInstanceForEntropy(t, DONUT_ENTROPY_DEFAULT)
+func TestCreateInstanceRejectsUnsupportedDefaultEntropy(t *testing.T) {
+	config := DefaultConfig()
+	config.Entropy = DONUT_ENTROPY_DEFAULT
+	config.ModuleData = bytes.NewBuffer([]byte("module-data"))
 
-	if len(first) != len(second) {
-		t.Fatalf("serialized instance lengths = %d and %d, want the same shape", len(first), len(second))
-	}
-	if bytes.Equal(first, second) {
-		t.Fatal("CreateInstance() with Entropy=DEFAULT produced identical serialized instances")
-	}
-
-	firstShellcode, err := Sandwich(X64, bytes.NewBuffer(first))
-	if err != nil {
-		t.Fatalf("Sandwich(first instance) error = %v", err)
-	}
-	secondShellcode, err := Sandwich(X64, bytes.NewBuffer(second))
-	if err != nil {
-		t.Fatalf("Sandwich(second instance) error = %v", err)
-	}
-
-	loaderOffset := 5 + len(first) + 1 // call+length, instance, pop rcx
-	if !bytes.Equal(firstShellcode.Bytes()[loaderOffset:], secondShellcode.Bytes()[loaderOffset:]) {
-		t.Fatal("default entropy changed the canonical x64 loader stage")
+	if _, err := CreateInstance(config); err == nil {
+		t.Fatal("CreateInstance() with unsupported default entropy returned nil error")
 	}
 }
 

