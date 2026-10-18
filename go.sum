@@ -4,3 +4,5 @@ github.com/akamensky/argparse v1.3.0 h1:/y3NFl6Nhw6alHDWoI9tx3vSyrB5zRgs4y9jzHxt
 github.com/akamensky/argparse v1.3.0/go.mod h1:S5kwC7IuDcEr5VeXtGPRVZ5o/FdhcMlQz4IZQuw64xA=
 github.com/google/uuid v1.2.0 h1:qJYtXnJRWmpe7m/3XlyhrsLrEURqHRM2kxzoxXqyUDs=
 github.com/google/uuid v1.2.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+golang.org/x/arch v0.32.0 h1:NjGf8/xGf5JgAJ4dw4NtME5R1L7xatagqAg95T3LgII=
+golang.org/x/arch v0.32.0/go.mod h1:KcJSod3cqT2dKcjBxqTyGfbumNikqU9p5tHJinPJnuY=

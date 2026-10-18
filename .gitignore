@@ -13,3 +13,5 @@
 
 # Local release validation artifacts and reports
 .release-validation/
+.research/
+nul

@@ -30,7 +30,7 @@ func run(args []string) error {
 	url := parser.String("u", "url", &argparse.Options{Required: false,
 		Help: "HTTP server that will host the donut module."})
 	entropy := parser.Int("e", "entropy", &argparse.Options{Required: false, Default: 2,
-		Help: "Entropy. 1=disable, 2=use random names (default)"})
+		Help: "Entropy. 1=disable, 2=use random names (default), 3=random names + encryption."})
 
 	//  -PIC/SHELLCODE OPTIONS-
 	archStr := parser.String("a", "arch", &argparse.Options{Required: false,
@@ -42,7 +42,7 @@ func run(args []string) error {
 	format := parser.Int("f", "format", &argparse.Options{Required: false,
 		Default: 1, Help: "Output format. 0 or 1=raw (the only supported format)"})
 	oepString := parser.String("y", "oep", &argparse.Options{Required: false,
-		Help: "Create a new thread for loader. Optionally execute original entrypoint of host process."})
+		Help: "Hexadecimal original-entrypoint offset (32-bit)."})
 	action := parser.Int("x", "exit", &argparse.Options{Required: false,
 		Default: 1, Help: "Exiting. 1=exit thread, 2=exit process"})
 
@@ -69,7 +69,9 @@ func run(args []string) error {
 		Help: ".NET assembly, EXE, DLL, VBS, JS or XSL file to execute in-memory."})
 
 	morphFlag := parser.Flag("", "morph", &argparse.Options{Required: false,
-		Help: "Enable RX-safe generation-time variation of loader bytes."})
+		Help: "Encrypt the loader core per build behind an RX-safe generation-time trampoline."})
+	evadeFlag := parser.String("", "evade", &argparse.Options{Required: false, Default: "off",
+		Help: "Patchless evasion via hardware breakpoints + VEH: off, hwbp (all families), or a comma list of amsi,etw,wldp (e.g. --evade amsi for .NET payloads, --evade amsi,etw)."})
 	verbose := parser.Flag("v", "verbose", &argparse.Options{Required: false, Help: "Show verbose output."})
 
 	if err := parser.Parse(args); err != nil {
@@ -129,14 +131,50 @@ func run(args []string) error {
 		config.Unicode = 1
 	}
 	config.Morph = *morphFlag
+	// --evade accepts: off | hwbp (= all families) | comma list (amsi,etw,wldp)
+	evadeArg := strings.ToLower(strings.TrimSpace(*evadeFlag))
+	switch {
+	case evadeArg == "", evadeArg == "off":
+		config.Evade = donut.EvadeNone
+	case evadeArg == "hwbp", evadeArg == "all":
+		config.Evade = donut.EvadeHwbp
+		config.EvadeTargets = 0 // zero = all families
+	default:
+		var tgt donut.EvadeTargets
+		hasEmptyFamily := false
+		for _, rawFamily := range strings.Split(evadeArg, ",") {
+			family := strings.TrimSpace(rawFamily)
+			switch family {
+			case "":
+				hasEmptyFamily = true
+			case "amsi":
+				tgt |= donut.EvadeAmsi
+			case "etw":
+				tgt |= donut.EvadeEtw
+			case "wldp":
+				tgt |= donut.EvadeWldp
+			default:
+				return fmt.Errorf("unknown --evade value %q (off | hwbp | comma list of amsi,etw,wldp)", family)
+			}
+		}
+		if tgt == 0 {
+			return fmt.Errorf("--evade list %q selected no families", evadeArg)
+		}
+		if hasEmptyFamily {
+			return fmt.Errorf("--evade list %q contains an empty family", evadeArg)
+		}
+		config.Evade = donut.EvadeHwbp
+		config.EvadeTargets = tgt
+	}
 	config.ExitOpt = uint32(*action)
 
 	return generateAndWrite(*srcFile, *url, *dstFile, config)
 }
 
 func validateOptionValues(entropy, compress, format int) error {
-	if entropy != int(donut.DONUT_ENTROPY_NONE) && entropy != int(donut.DONUT_ENTROPY_RANDOM) {
-		return fmt.Errorf("unsupported entropy %d: supported values are 1 (none) and 2 (random names)", entropy)
+	if entropy != int(donut.DONUT_ENTROPY_NONE) && entropy != int(donut.DONUT_ENTROPY_RANDOM) &&
+		entropy != int(donut.DONUT_ENTROPY_DEFAULT) {
+		return fmt.Errorf("unsupported entropy %d: supported values are 1 (none), 2 (random names), and 3 (random names + encryption)", entropy)
 	}
 	if compress != 0 && compress != 1 {
 		return fmt.Errorf("unsupported compression %d: supported values are 0 or 1 (none)", compress)

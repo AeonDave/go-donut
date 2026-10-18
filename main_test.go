@@ -56,6 +56,34 @@ func TestRunReturnsInputFileError(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidEvadeFamilyListsWithoutOutput(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "unknown family", value: "unknown", want: `unknown --evade value "unknown"`},
+		{name: "empty list element", value: "amsi,,etw", want: `contains an empty family`},
+		{name: "no valid families", value: ",", want: `selected no families`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "loader.bin")
+			err := run([]string{"go-donut", "-i", "missing.exe", "-o", out, "--evade", tt.value})
+			if err == nil {
+				t.Fatal("run() error = nil, want invalid --evade error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("run() error = %q, want substring %q", err, tt.want)
+			}
+			if _, statErr := os.Stat(out); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("output file exists after invalid --evade value %q: stat error = %v", tt.value, statErr)
+			}
+		})
+	}
+}
+
 func TestRunRejectsUnsupportedOptions(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -63,7 +91,7 @@ func TestRunRejectsUnsupportedOptions(t *testing.T) {
 		value string
 		want  string
 	}{
-		{name: "entropy", flag: "-e", value: "3", want: "unsupported entropy 3"},
+		{name: "entropy", flag: "-e", value: "4", want: "unsupported entropy 4"},
 		{name: "compression", flag: "-z", value: "2", want: "unsupported compression 2"},
 		{name: "format", flag: "-f", value: "2", want: "unsupported format 2"},
 	}
