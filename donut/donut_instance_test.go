@@ -101,13 +101,13 @@ func TestCreateInstanceWithoutEntropyIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestCreateInstanceRejectsUnsupportedDefaultEntropy(t *testing.T) {
+func TestCreateInstanceAcceptsDefaultEntropy(t *testing.T) {
 	config := DefaultConfig()
 	config.Entropy = DONUT_ENTROPY_DEFAULT
 	config.ModuleData = bytes.NewBuffer([]byte("module-data"))
 
-	if _, err := CreateInstance(config); err == nil {
-		t.Fatal("CreateInstance() with unsupported default entropy returned nil error")
+	if _, err := CreateInstance(config); err != nil {
+		t.Fatalf("CreateInstance() with default entropy returned error: %v", err)
 	}
 }
 

@@ -22,12 +22,19 @@ func TestDefaultConfigUsesSupportedOptions(t *testing.T) {
 }
 
 func TestShellcodeFromBytesRejectsUnsupportedOptions(t *testing.T) {
+	t.Run("accepts encrypted entropy", func(t *testing.T) {
+		config := DefaultConfig()
+		config.Entropy = DONUT_ENTROPY_DEFAULT
+		if _, err := ShellcodeFromBytes(bytes.NewBuffer([]byte("payload")), config); err != nil {
+			t.Fatalf("ShellcodeFromBytes() with entropy 3 returned error: %v", err)
+		}
+	})
+
 	tests := []struct {
 		name   string
 		mutate func(*DonutConfig)
 		want   string
 	}{
-		{name: "encrypted entropy", mutate: func(c *DonutConfig) { c.Entropy = DONUT_ENTROPY_DEFAULT }, want: "unsupported entropy 3"},
 		{name: "compression", mutate: func(c *DonutConfig) { c.Compress = 2 }, want: "unsupported compression 2"},
 		{name: "base64 format", mutate: func(c *DonutConfig) { c.Format = 2 }, want: "unsupported format 2"},
 	}
@@ -68,12 +75,22 @@ func TestShellcodeFromFileRejectsUnsupportedOptionsBeforeReading(t *testing.T) {
 }
 
 func TestCreateModuleAndCreateInstanceRejectUnsupportedOptions(t *testing.T) {
+	t.Run("accepts encrypted entropy", func(t *testing.T) {
+		config := DefaultConfig()
+		config.Entropy = DONUT_ENTROPY_DEFAULT
+		if err := CreateModule(config, bytes.NewBuffer([]byte("payload"))); err != nil {
+			t.Fatalf("CreateModule() with entropy 3 returned error: %v", err)
+		}
+		if _, err := CreateInstance(config); err != nil {
+			t.Fatalf("CreateInstance() with entropy 3 returned error: %v", err)
+		}
+	})
+
 	for _, option := range []struct {
 		name   string
 		mutate func(*DonutConfig)
 		want   string
 	}{
-		{name: "entropy", mutate: func(c *DonutConfig) { c.Entropy = DONUT_ENTROPY_DEFAULT }, want: "unsupported entropy 3"},
 		{name: "compression", mutate: func(c *DonutConfig) { c.Compress = 2 }, want: "unsupported compression 2"},
 		{name: "format", mutate: func(c *DonutConfig) { c.Format = 2 }, want: "unsupported format 2"},
 	} {

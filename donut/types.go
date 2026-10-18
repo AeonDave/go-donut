@@ -12,7 +12,7 @@ const (
 	// entropy level
 	DONUT_ENTROPY_NONE    = 1 // don't use any entropy
 	DONUT_ENTROPY_RANDOM  = 2 // use random names
-	DONUT_ENTROPY_DEFAULT = 3 // unsupported: random names + symmetric encryption
+	DONUT_ENTROPY_DEFAULT = 3 // random names + symmetric encryption
 
 	DONUT_MAX_PARAM   = 8 // maximum number of parameters passed to method
 	DONUT_MAX_NAME    = 256
@@ -91,13 +91,15 @@ type DonutConfig struct {
 	ExitOpt  uint32
 	Format   uint32
 
-	Domain  string // .NET stuff
-	Class   string
-	Method  string // Used by Native DLL and .NET DLL
-	Runtime string
-	Bypass  int
-	Headers int
-	Morph   bool // Enable RX-safe generation-time variation of loader stub
+	Domain       string // .NET stuff
+	Class        string
+	Method       string // Used by Native DLL and .NET DLL
+	Runtime      string
+	Bypass       int
+	Headers      int
+	Morph        bool         // Enable RX-safe generation-time variation of loader stub
+	Evade        EvadeMode    // Patchless AMSI/WLDP/ETW evasion (EvadeHwbp) or none; forces the built-in patch off
+	EvadeTargets EvadeTargets // Interception families to arm (0 = all; e.g. EvadeAmsi alone for .NET payloads — WP1-lite)
 
 	Module     *DonutModule
 	ModuleName string
@@ -305,13 +307,13 @@ func (inst *DonutInstance) WriteTo(w *bytes.Buffer) {
 	WriteField(w, "Password", inst.Password)
 	WriteField(w, "HttpReq", inst.HttpReq)
 	WriteField(w, "Sig", inst.Sig)
-	WriteField(w, "Mac", inst.Mac)
-	WriteField(w, "ModKeyMk", inst.ModKeyMk)
-	WriteField(w, "ModKeCtr", inst.ModKeyCtr)
-	// 4-byte padding: mod_key ends at offset not aligned to 8 for uint64_t mod_len
+	// 4-byte padding: sig ends at 3372; uint64_t mac needs 8-byte alignment
 	for i := 0; i < 4; i++ {
 		w.WriteByte(0)
 	}
+	WriteField(w, "Mac", inst.Mac)
+	WriteField(w, "ModKeyMk", inst.ModKeyMk)
+	WriteField(w, "ModKeCtr", inst.ModKeyCtr)
 	WriteField(w, "Mod_len", inst.Mod_len)
 }
 
