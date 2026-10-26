@@ -1,0 +1,3 @@
+# Vendored upstream loader source is kept byte-identical for reproducible loader builds.
+# Preserve its historical trailing whitespace while retaining normal textual diffs.
+loader-src/** whitespace=-trailing-space

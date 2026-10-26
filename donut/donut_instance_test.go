@@ -22,20 +22,20 @@ func TestX64LoaderKeepsV11StackAlignmentPreamble(t *testing.T) {
 	}
 }
 
-func TestX64LoaderMatchesOfficialV11PatchedFinalStage(t *testing.T) {
-	const rawCoreLength = 13430
-	const finalStageLength = 13478
-	const patchedRawCoreSHA256 = "d63fc4e0634e096ed4f655194d51cdabddbf1b6801431b25f2b0651201917d88"
-	const relocationFixOffset = 22 + 0x227d
+func TestX64LoaderMatchesSourceBuiltSEHCandidate(t *testing.T) {
+	const rawCoreLength = 14738
+	const finalStageLength = 22 + rawCoreLength + 26
+	const sourceCoreSHA256 = "c0bc2e12e92bbb8cd74481412cb25ea72c053ea051a4a0deba595c5f83143800"
+	const wrapperSHA256 = "4429a7dc9c01f72eac8aca9a01bbfc6594f166acbf0947aba5b89d0538ea6d0d"
 
 	if len(LOADER_EXE_X64) != finalStageLength {
 		t.Fatalf("x64 final stage length = %d, want %d", len(LOADER_EXE_X64), finalStageLength)
 	}
-	if got := fmt.Sprintf("%x", sha256.Sum256(LOADER_EXE_X64[22:22+rawCoreLength])); got != patchedRawCoreSHA256 {
-		t.Fatalf("x64 patched raw core SHA-256 = %s, want source-guided v1.1 patch %s", got, patchedRawCoreSHA256)
+	if got := fmt.Sprintf("%x", sha256.Sum256(LOADER_EXE_X64[:22])); got != wrapperSHA256 {
+		t.Fatalf("v1.1 wrapper changed: %s", got)
 	}
-	if got, want := LOADER_EXE_X64[relocationFixOffset:relocationFixOffset+4], []byte{0x90, 0x90, 0x90, 0x90}; !bytes.Equal(got, want) {
-		t.Fatalf("x64 relocation fix at core raw offset 0x227d = % x, want NOPs", got)
+	if got := fmt.Sprintf("%x", sha256.Sum256(LOADER_EXE_X64[22:22+rawCoreLength])); got != sourceCoreSHA256 {
+		t.Fatalf("source-built candidate raw core SHA-256 = %s, want %s", got, sourceCoreSHA256)
 	}
 	for i, b := range LOADER_EXE_X64[22+rawCoreLength:] {
 		if b != 0 {

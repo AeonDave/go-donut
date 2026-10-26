@@ -575,7 +575,8 @@ func CreateInstance(config *DonutConfig) (*bytes.Buffer, error) {
 				inst.Hash[cnt])
 		}
 	}
-	// save how many API to resolve
+	// Slot 63 is a lazy x64 RunPE import; do not include it in eager resolution.
+	inst.Hash[63] = Maru([]byte("RtlAddFunctionTable"), inst.Iv) ^ Maru([]byte(NTDLL_DLL), inst.Iv)
 	inst.ApiCount = uint32(len(api_imports))
 	copy(inst.DllNames[:], "ole32;oleaut32;wininet;mscoree;shell32")
 

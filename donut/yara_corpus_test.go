@@ -18,8 +18,11 @@ package donut
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"log"
+	"os"
 	"strings"
 	"testing"
 )
@@ -50,22 +53,57 @@ var yaraStringAtoms = []string{
 	"RtlAddVectoredExceptionHandler",
 }
 
+// sourceBuiltSEHLoaderAtoms are independent fingerprints from distinct
+// regions of the current source-built x64 core. The first two identify
+// stable core code; the third is from the exception-directory/function-table
+// registration path. These are exposure controls, not evasion claims.
+var sourceBuiltSEHLoaderAtoms = [][]byte{
+	{0x4D, 0x85, 0xE4, 0x75, 0x18, 0x48, 0x8B, 0xBE, 0xC8, 0x00, 0x00, 0x00},
+	{0x0D, 0x3D, 0xF1, 0xFF, 0xFF, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x01, 0x00},
+	{0x45, 0x0F, 0xB7, 0x7D, 0x14, 0x33, 0xD2, 0x48, 0x8B, 0x44, 0x24, 0x50},
+}
+
 // rapid7SandwichAtom — { 59 31 C0 48 0F } : pop rcx; xor eax,eax; 48 0F (the
 // x84 mode-switch discriminator) at offset LE32(1)+5 of the artifact.
 var rapid7SandwichAtom = []byte{0x59, 0x31, 0xC0, 0x48, 0x0F}
 
 func TestYARACorpus_CanonicalBlobsMatchLoaderAtoms(t *testing.T) {
-	// Positive control: our pinned v1.1 blobs ARE the official stages the
-	// Volexity/Elastic rules were written against. If this fails, either the
-	// blobs drifted or the corpus transcription is wrong.
+	// Retain the original positive control against the version-pinned prior
+	// stage: broad source rebuilds are not expected to preserve old code atoms.
+	previous, err := os.ReadFile("testdata/official-v11-before-seh.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprintf("%x", sha256.Sum256(previous)), "1acd966029c3188d198a9096e2af126c34ac9a82ec2550652d9e6cf3f486e886"; got != want {
+		t.Fatalf("previous stage SHA-256 = %s, want %s", got, want)
+	}
 	hits := 0
 	for _, atom := range yaraLoaderAtoms {
-		if bytes.Contains(LOADER_EXE_X64, atom) || bytes.Contains(LOADER_EXE_X86, atom) {
+		if bytes.Contains(previous, atom) || bytes.Contains(LOADER_EXE_X86, atom) {
 			hits++
 		}
 	}
 	if hits < 4 {
-		t.Fatalf("canonical blobs matched only %d/%d loader atoms — corpus transcription or blob drift", hits, len(yaraLoaderAtoms))
+		t.Fatalf("historical control matched only %d/%d loader atoms", hits, len(yaraLoaderAtoms))
+	}
+	// Keep the legacy observation explicit, and independently fingerprint the
+	// current source-built core (including its exception-registration path).
+	if !bytes.Contains(LOADER_EXE_X64, yaraLoaderAtoms[0]) {
+		t.Fatal("candidate lost observed Elastic loader atom #0")
+	}
+	candidateHits := 0
+	for i, atom := range sourceBuiltSEHLoaderAtoms {
+		if got := bytes.Count(LOADER_EXE_X64, atom); got != 1 {
+			t.Errorf("source-built candidate atom #%d occurs %d times, want exactly once", i, got)
+		} else {
+			candidateHits++
+		}
+		if bytes.Contains(previous, atom) {
+			t.Errorf("source-built candidate atom #%d unexpectedly occurs in historical fixture", i)
+		}
+	}
+	if candidateHits < 2 {
+		t.Fatalf("source-built candidate matched only %d/%d independent fingerprints", candidateHits, len(sourceBuiltSEHLoaderAtoms))
 	}
 }
 
@@ -204,23 +242,30 @@ func TestYARACorpus_MorphArtifactsUnique(t *testing.T) {
 	}
 }
 
-// TestYARACorpus_CanonicalArtifactsStillMatch — positive control at the
-// artifact level: canonical (no morph, no evade) output must still contain
-// the loader atoms; otherwise this suite would pass vacuously.
+// TestYARACorpus_CanonicalArtifactsStillMatch — candidate artifact must
+// contain its exact plaintext stage and multiple independent core fingerprints.
 func TestYARACorpus_CanonicalArtifactsStillMatch(t *testing.T) {
 	payload := make([]byte, 4760)
 	out, err := sandwich(X64, bytes.NewBuffer(append([]byte(nil), payload...)), false, EvadeNone, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hits := 0
-	for _, atom := range yaraLoaderAtoms {
+	if !bytes.Contains(out.Bytes(), LOADER_EXE_X64[:len(LOADER_EXE_X64)-26]) {
+		t.Fatal("canonical artifact lost the source-built loader stage")
+	}
+	if !bytes.Contains(out.Bytes(), yaraLoaderAtoms[0]) {
+		t.Fatal("canonical candidate artifact lost observed Elastic loader atom #0")
+	}
+	candidateHits := 0
+	for i, atom := range sourceBuiltSEHLoaderAtoms {
 		if bytes.Contains(out.Bytes(), atom) {
-			hits++
+			candidateHits++
+		} else {
+			t.Errorf("canonical candidate artifact lost source-built atom #%d", i)
 		}
 	}
-	if hits < 2 {
-		t.Fatalf("canonical artifact matched only %d loader atoms — vacuous suite", hits)
+	if candidateHits < 2 {
+		t.Fatalf("canonical candidate artifact matched only %d/%d source-built fingerprints", candidateHits, len(sourceBuiltSEHLoaderAtoms))
 	}
 }
 
